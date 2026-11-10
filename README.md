@@ -8,9 +8,9 @@ installed to disk (no live-in-RAM design), so small servers work.
 - `nodes/<name>.yml`: one file per node (`device`, optional `disk_gib`, optional `hostname`, optional extra `users`). Hostname is `<name>.<node_domain>`.
 - `build.py`: renders Butane, runs `butane --strict` and `ignition-validate` (podman containers) -> `build/<node>.ign`.
 - `files/`: scripts baked into the Ignition (`apps-sync`, `secrets-sync`, `data-init`).
-- `scripts/`: admin helpers (`node-key.sh`, `add-node.sh`, `init-netbird-backend.sh`, `lint.sh`, build scripts).
-- `secrets/`: per-node folders `secrets/<node>/` with `targets.conf` and `*.sops` encrypted dotenv files, plus the `tools.version` pin. Synced at runtime, NOT baked in; ciphertext only.
-- `apps/<name>/*`: Quadlet apps (flat dir per app). NOT baked in; synced onto nodes at runtime.
+- `scripts/`: node bootstrap and build/CI scripts only (`node-key.sh`, `add-node.sh`, `build-ign.sh`, `build-iso.sh`, `make-site.sh`, `lint.sh`). No app-specific scripts: apps are declarative.
+- `secrets/`: per-node folders `secrets/<node>/` with `targets.conf` and `*.sops` encrypted files (dotenv, yaml, json, ini, binary), plus the `tools.version` pin. Synced at runtime, NOT baked in; ciphertext only.
+- `apps/<name>/*`: Quadlet apps (flat dir per app) with their own `README.md`. NOT baked in; synced onto nodes at runtime.
 - Published: ISOs as assets of the rolling `latest` release; key-free `<node>.ign`/`.bu`/sha256 on GitHub Pages.
 
 What the Ignition sets up (first boot only): hostname, users with SSH keys, no
@@ -50,20 +50,21 @@ Create `nodes/<name>.yml` (copy `nodes/ecstasy.yml`, set `device`), push to `mai
 
 ## Secrets (SOPS + age)
 
-> **Needs a reinstall:** `secrets-sync` (script, service, timer) and the node key generation are baked into the Ignition, and Ignition
-> only runs on first boot. An already installed node gets them only after reinstalling with the new ISO/Ignition, once; the `data`
-> partition (age key, SSH host key, containers) is kept. With the **custom ISO**: attach the new `<node>.iso` from the `latest` release
-> and boot it (it carries `save-partlabel: [data]`). With the **stock ISO**:
+> **Needs a reinstall (once, exact commands below):** `secrets-sync` (script, service, timer, file-name formats, skip rule), the changed `apps-sync`
+> (never deploys `README*`, `reset` keeps persistent volumes) and the node key generation are baked into the Ignition, and Ignition only runs on first boot. An already
+> installed node gets them only after reinstalling with the new ISO/Ignition, once; the `data` partition (age key, SSH host key,
+> containers, NetBird state) is kept. With the **custom ISO**: attach the new `<node>.iso` from the `latest` release and boot it (it
+> carries `save-partlabel: [data]`). With the **stock ISO**:
 > `sudo coreos-installer install /dev/vda --save-partlabel data --ignition-url https://<owner>.github.io/<repo>/<node>.ign`.
 > Keep `root_size_gib` unchanged. Details: [Change users](#change-users-reinstall-keep-data). Everything else here (manifests,
-> encrypted files, `tools.version`) is synced from git and needs no reinstall.
+> encrypted files, `tools.version`, apps) is synced from git and needs no reinstall.
 
 The repo is public and holds the secrets only as [SOPS](https://github.com/getsops/sops) ciphertext. Each node generates its own
 [age](https://github.com/FiloSottile/age) key, `/var/data/secrets/age.key` (0600 root, never leaves the node, survives a reinstall on the
 `data` partition), and publishes the public half in `/var/data/secrets/age.pub` (also printed to the journal). A node decrypts only its
 own folder `secrets/<node>/` (`<node>` = short hostname, e.g. `ecstasy`). `secrets-sync` runs at boot after network-online, then every
 15 minutes, or on demand with `sudo systemctl start secrets-sync`. It decrypts each encrypted file with
-`sops --decrypt --input-type dotenv --output-type dotenv` into its destination and restarts only the units whose file changed.
+`sops --decrypt --input-type <type> --output-type <type>` into its destination and restarts only the units whose file changed.
 All-or-nothing: on any failure every existing file is kept, nothing is restarted and it exits non-zero (see `journalctl -u secrets-sync`).
 
 `sops` 3.13.3 and `age-keygen` 1.3.2 are pinned in `secrets/tools.version`, downloaded on demand from the official GitHub releases into
@@ -71,13 +72,21 @@ All-or-nothing: on any failure every existing file is kept, nothing is restarted
 checksum file, so its sha256 was computed from the official asset). Checked on a booted FCOS 44 image: it ships `jq`, `curl`, `tar`, `flock` and coreutils but no `yq`, Python, `sops` or `age`; `secrets-sync` uses only what ships plus the two pinned binaries. Bump the pin in git to upgrade.
 
 - `secrets/<node>/targets.conf`: one target per line: `<encrypted-file> <destination> <mode> <owner:group|-> <units,comma|->`. File names are relative to the node's folder.
-- `secrets/<node>/*.sops`: SOPS dotenv files. Keys stay visible, values AND comments are encrypted. Everything in the file is encrypted,
-  also non-secret values such as `NB_MANAGEMENT_URL=https://netbird.veronoi.cc`; that is fine, they go into the same file.
+- `secrets/<node>/*.sops`: SOPS files, rendered **whole** to their destination. The sops format comes from the file name (before `.sops`):
+  `*.env.sops` dotenv, `*.yaml.sops`/`*.yml.sops` yaml, `*.json.sops` json, `*.ini.sops` ini, anything else binary. dotenv must hold
+  `KEY=value` lines (no empty values), every other format must decrypt to something non-empty. Keys stay visible, values (and dotenv comments)
+  are encrypted. Any new target of any format needs only a `targets.conf` line, never a change to the baked script.
 - `secrets/tools.version`: the pinned tool versions and sha256 values.
 
-First target: `secrets/ecstasy/netbird.env.sops` -> `/var/data/secrets/netbird.env` (0600 root), restarting `netbird.service`. The repo
-ships only the manifest; the encrypted file does not exist until you create it, and until then the node logs one line and does nothing
-(`netbird.service` is skipped by its `ConditionPathExists`).
+Targets: `secrets/ecstasy/netbird.env.sops` -> `/var/data/secrets/netbird.env` (0600 root, restarts `netbird.service`, the client) and
+`secrets/ecstasy/netbird-server.yaml.sops` -> `/var/data/netbird-backend/config.yaml` (0600 root, restarts the three NetBird backend
+units, see [`apps/netbird-backend/README.md`](apps/netbird-backend/README.md)). The repo ships only the manifest lines.
+
+**Files that do not exist yet:** a manifest line whose encrypted file is not in the folder is **skipped with one log line**
+(`skipping <file>: not in secrets/<node>/ yet`); the other targets still render. The admin adds files in steps (the manifest is
+shipped ahead of the ciphertext), and a missing file must not break targets that already work. An already rendered destination is never
+removed by a skip. A file that exists but cannot be decrypted (other node's key, tampered, empty, malformed) still fails everything.
+If no listed file exists at all, `secrets-sync` logs one line and exits 0.
 
 **First-time admin setup:**
 
@@ -134,7 +143,7 @@ units within 15 minutes, or immediately with `sudo systemctl start secrets-sync`
 - There is no audit log of who decrypted what.
 - age X25519 is not post-quantum: harvest-now-decrypt-later applies to a public repo.
 - Keys visible, values encrypted: key names, file and folder names, modification times and recipient public keys are public.
-- The secrets generated on the node by `scripts/init-netbird-backend.sh` are not in the repo and need their own backup (see the backend section).
+- The NetBird backend's `config.yaml` (store encryption key, auth secrets) is ciphertext in this public repo: see the security note in [`apps/netbird-backend/README.md`](apps/netbird-backend/README.md).
 
 ## Apps from git (no reinstall)
 
@@ -145,7 +154,7 @@ Add `apps/<name>/<file>.container|.volume|.network|...`, push to `main`. Each no
 sudo systemctl start apps-sync
 ```
 
-`apps-sync` downloads `<repo_url>/archive/refs/heads/<branch>.tar.gz`, copies `apps/*` into
+`apps-sync` downloads `<repo_url>/archive/refs/heads/<branch>.tar.gz`, copies `apps/*` (except `README*`) into
 `/etc/containers/systemd/apps/<name>/`, deletes managed files whose app/file is gone (stopping their
 units; **volumes are kept**), runs `daemon-reload`, and restarts only units whose files changed
 (a changed non-Quadlet file such as an env file restarts that app's containers). Unchanged apps are not restarted.
@@ -155,49 +164,25 @@ To wipe an app's state (stop, `podman rm -f` its container, `podman volume rm` i
 
 ```
 sudo apps-sync reset <app>
+sudo apps-sync reset --include-persistent <app>
 ```
+
+A `.volume` file containing the comment line `# apps-sync: keep` is **persistent**: `reset` keeps that volume (and prints
+`kept persistent volume <name>`); only `--include-persistent` removes it too. The marker is only read in `.volume` files; Quadlet
+ignores `#` comments.
+
+**Documentation convention:** every app has a `apps/<name>/README.md` for its specifics (see [`whoami`](apps/whoami/README.md),
+[`netbird-backend`](apps/netbird-backend/README.md)). `README*` files (any case) are never deployed: they do not restart anything, and a
+copy left on a node by an older `apps-sync` is removed quietly. Every other regular file in an app directory is deployed.
 
 ## Self-hosted NetBird backend
 
-Optional control plane on a node (ecstasy), domain `netbird.veronoi.cc`, defined in `apps/netbird-backend/`
-and deployed by `apps-sync` like any app (no reinstall). Four Quadlets plus one file:
-
-- `netbird-server` (`netbirdio/netbird-server`): management, signal, relay, embedded STUN and the embedded Dex IdP in one container. Publishes only `3478/udp`.
-- `netbird-dashboard` (`netbirdio/dashboard`): web UI, not published.
-- `netbird-traefik`: reverse proxy and Let's Encrypt (tlsChallenge). Publishes `80` and `443`. It uses Traefik's **file provider** (`traefik-dynamic.yml`, synced by apps-sync) instead of the Docker provider, so no container socket is mounted.
-- `netbird-backend.network`: dedicated network (`172.30.0.0/24`); the server trusts forwarded client IPs only from it.
-
-The units are skipped (`ConditionPathExists`) until the init script has generated their files, so syncing the repo to a
-fresh node never crash-loops. State lives only in `/var/data/netbird-backend/` (`config.yaml`, `dashboard.env`,
-`traefik.yml`, `netbird/` database and keys, `letsencrypt/`), all 0600/0700 root.
-
-**Prerequisites:** the node is installed and reachable over ssh, has 2 GB+ RAM, and `apps/netbird-backend` is on the branch `apps-sync` follows (`repo_url`/`branch` in `config.yml`).
-
-**DNS:** an A record `netbird.veronoi.cc` -> the node's public IP. Let's Encrypt needs it, and ports 80 and 443 reachable from the internet, to issue the certificate.
-
-**Firewall (provider):** `80/tcp`, `443/tcp`, `3478/udp` (STUN cannot be proxied).
-
-**Init** (generates random secrets on the node, never in git or on your machine; idempotent, existing files are kept):
-
-```
-scripts/init-netbird-backend.sh veronoicc@ecstasy.node.veronoi.cc you@example.org
-```
-
-The email is only used for Let's Encrypt and ends up in the node's `traefik.yml`. `--force` regenerates the files,
-**including the store encryption key**: an existing database can no longer be read afterwards (the old `config.yaml` is
-kept as `config.yaml.bak-*`). Do not use it on a node with data unless you intend to start over.
-
-**First admin and joining ecstasy:**
-
-1. Open `https://netbird.veronoi.cc/setup` and create the first admin (the dashboard and embedded Dex are served by the node itself).
-2. Dashboard -> Setup Keys -> create a key.
-3. Encrypt the key for the node (`NB_SETUP_KEY=<key>` and `NB_MANAGEMENT_URL=https://netbird.veronoi.cc` in `secrets/ecstasy/netbird.env.sops`, see [Secrets](#secrets-sops--age)) and push; `sudo systemctl start secrets-sync` on the node renders it now.
-
-**Backup:** copy `/var/data/netbird-backend` (as root, ideally with the server stopped for a consistent SQLite copy). It holds the database, keys, config and ACME account/certificates; losing `config.yaml` makes the database unreadable.
-
-**Upgrade:** images are pinned in the Quadlets (`netbird-server`, `dashboard`, `traefik` tags). Bump the tags in git; `apps-sync` restarts only the changed units. Nothing uses `AutoUpdate`.
-
-**Failure mode:** if the backend is down, existing tunnels keep working (WireGuard peers talk directly or via relays already in use). New peers, login, ACL/route changes and relayed re-connections do not work until it is back.
+Optional control plane on ecstasy (`netbird.veronoi.cc`), fully declarative: Quadlets and plain config from `apps/netbird-backend/` via
+`apps-sync`, the server config with its secrets as `secrets/ecstasy/netbird-server.yaml.sops` via `secrets-sync`, state in Quadlet named
+volumes. No helper script. Setup, DNS/firewall, the `sops` recipe, backup, reset and the security note are in
+[`apps/netbird-backend/README.md`](apps/netbird-backend/README.md). It needs the one-time reinstall described under
+[Secrets](#secrets-sops--age) because `secrets-sync` and `apps-sync` are baked. The NetBird *client* (`netbird.container`, `NB_SETUP_KEY`
+from `secrets/ecstasy/netbird.env.sops`) is baked into the Ignition and is not an app.
 
 ## Change users (reinstall, keep data)
 
@@ -226,7 +211,8 @@ REPO_URL=https://github.com/<owner>/<repo> scripts/build-iso.sh ecstasy    # dis
 Opt-in QEMU tests (need qemu, KVM recommended, ~2 GB downloads; skipped by default):
 
 ```
-# boot the stable QEMU image with the real Ignition: hostname, ssh, data partition, apps-sync, netbird gating, secrets-sync
+# boot the stable QEMU image with the real Ignition: hostname, ssh, data partition, apps-sync, netbird gating, secrets-sync,
+# and the whole NetBird backend (README recipe -> encrypted config.yaml -> three units up, routing, named volumes, reset); needs internet in the VM
 SMOKE_QCOW2=/path/to/fedora-coreos-*-qemu.x86_64.qcow2 .venv/bin/python -m pytest tests/test_smoke_qemu.py
 # install from a custom ISO, then reinstall from another: the data partition must survive
 SMOKE_STOCK_ISO=$(ls build/iso-cache/*.iso) .venv/bin/python -m pytest tests/test_iso_reinstall_qemu.py
