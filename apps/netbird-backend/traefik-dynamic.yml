@@ -1,0 +1,40 @@
+# Traefik dynamic config (file provider) for netbird.veronoi.cc. Synced by apps-sync; no secrets here.
+# Paths per https://docs.netbird.io/selfhosted/external-reverse-proxy (combined container).
+# The optional NetBird Proxy feature (its separate gRPC service) is intentionally not routed.
+http:
+  routers:
+    netbird-grpc:
+      rule: Host(`netbird.veronoi.cc`) && (PathPrefix(`/signalexchange.SignalExchange/`) || PathPrefix(`/management.ManagementService/`))
+      entryPoints: [websecure]
+      tls:
+        certResolver: letsencrypt
+      service: netbird-server-h2c
+      priority: 100
+    netbird-backend:
+      rule: Host(`netbird.veronoi.cc`) && (PathPrefix(`/relay`) || PathPrefix(`/ws-proxy/`) || PathPrefix(`/api`) || PathPrefix(`/oauth2`))
+      entryPoints: [websecure]
+      tls:
+        certResolver: letsencrypt
+      service: netbird-server
+      priority: 100
+    netbird-dashboard:
+      rule: Host(`netbird.veronoi.cc`)
+      entryPoints: [websecure]
+      tls:
+        certResolver: letsencrypt
+      service: netbird-dashboard
+      priority: 1
+  services:
+    netbird-server:
+      loadBalancer:
+        servers:
+          - url: http://netbird-server:80
+    # gRPC needs HTTP/2 cleartext to the backend.
+    netbird-server-h2c:
+      loadBalancer:
+        servers:
+          - url: h2c://netbird-server:80
+    netbird-dashboard:
+      loadBalancer:
+        servers:
+          - url: http://netbird-dashboard:80
