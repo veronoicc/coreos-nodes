@@ -57,6 +57,15 @@ scripts/push-secrets.sh veronoicc@ecstasy.node.veronoi.cc [key-file]
 It writes `/var/data/secrets/netbird.env` (`NB_SETUP_KEY=...`, 0600 root) via `sudo install`
 and restarts `netbird.service`. Without a key-file it prompts. Before that, the unit is skipped by its `ConditionPathExists`.
 
+To join the node to the self-hosted backend (below) instead of NetBird Cloud, add the management URL; it is written
+as `NB_MANAGEMENT_URL=<url>` next to `NB_SETUP_KEY=` (the env var the NetBird client container reads):
+
+```
+scripts/push-secrets.sh veronoicc@ecstasy.node.veronoi.cc [key-file] --management-url https://netbird.veronoi.cc
+```
+
+Without `--management-url` the client uses NetBird Cloud.
+
 ## Apps from git (no reinstall)
 
 Add `apps/<name>/<file>.container|.volume|.network|...`, push to `main`. Each node runs
@@ -77,6 +86,48 @@ To wipe an app's state (stop, `podman rm -f` its container, `podman volume rm` i
 ```
 sudo apps-sync reset <app>
 ```
+
+## Self-hosted NetBird backend
+
+Optional control plane on a node (ecstasy), domain `netbird.veronoi.cc`, defined in `apps/netbird-backend/`
+and deployed by `apps-sync` like any app (no reinstall). Four Quadlets plus one file:
+
+- `netbird-server` (`netbirdio/netbird-server`): management, signal, relay, embedded STUN and the embedded Dex IdP in one container. Publishes only `3478/udp`.
+- `netbird-dashboard` (`netbirdio/dashboard`): web UI, not published.
+- `netbird-traefik`: reverse proxy and Let's Encrypt (tlsChallenge). Publishes `80` and `443`. It uses Traefik's **file provider** (`traefik-dynamic.yml`, synced by apps-sync) instead of the Docker provider, so no container socket is mounted.
+- `netbird-backend.network`: dedicated network (`172.30.0.0/24`); the server trusts forwarded client IPs only from it.
+
+The units are skipped (`ConditionPathExists`) until the init script has generated their files, so syncing the repo to a
+fresh node never crash-loops. State lives only in `/var/data/netbird-backend/` (`config.yaml`, `dashboard.env`,
+`traefik.yml`, `netbird/` database and keys, `letsencrypt/`), all 0600/0700 root.
+
+**Prerequisites:** the node is installed and reachable over ssh, has 2 GB+ RAM, and `apps/netbird-backend` is on the branch `apps-sync` follows (`repo_url`/`branch` in `config.yml`).
+
+**DNS:** an A record `netbird.veronoi.cc` -> the node's public IP. Let's Encrypt needs it, and ports 80 and 443 reachable from the internet, to issue the certificate.
+
+**Firewall (provider):** `80/tcp`, `443/tcp`, `3478/udp` (STUN cannot be proxied).
+
+**Init** (generates random secrets on the node, never in git or on your machine; idempotent, existing files are kept):
+
+```
+scripts/init-netbird-backend.sh veronoicc@ecstasy.node.veronoi.cc you@example.org
+```
+
+The email is only used for Let's Encrypt and ends up in the node's `traefik.yml`. `--force` regenerates the files,
+**including the store encryption key**: an existing database can no longer be read afterwards (the old `config.yaml` is
+kept as `config.yaml.bak-*`). Do not use it on a node with data unless you intend to start over.
+
+**First admin and joining ecstasy:**
+
+1. Open `https://netbird.veronoi.cc/setup` and create the first admin (the dashboard and embedded Dex are served by the node itself).
+2. Dashboard -> Setup Keys -> create a key.
+3. `scripts/push-secrets.sh veronoicc@ecstasy.node.veronoi.cc [key-file] --management-url https://netbird.veronoi.cc`
+
+**Backup:** copy `/var/data/netbird-backend` (as root, ideally with the server stopped for a consistent SQLite copy). It holds the database, keys, config and ACME account/certificates; losing `config.yaml` makes the database unreadable.
+
+**Upgrade:** images are pinned in the Quadlets (`netbird-server`, `dashboard`, `traefik` tags). Bump the tags in git; `apps-sync` restarts only the changed units. Nothing uses `AutoUpdate`.
+
+**Failure mode:** if the backend is down, existing tunnels keep working (WireGuard peers talk directly or via relays already in use). New peers, login, ACL/route changes and relayed re-connections do not work until it is back.
 
 ## Change users (reinstall, keep data)
 
