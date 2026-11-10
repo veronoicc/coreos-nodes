@@ -1,0 +1,12 @@
+# Hostname: ecstasy.<node_domain> unless `hostname:` is set here.
+# hostname: ecstasy.example.org
+
+# Install target of the custom ISO (coreos-installer --dest-device). Booting
+# that ISO WIPES this disk without asking. Must be right for this machine.
+device: /dev/vda
+
+# Extra users on top of config.yml (same shape):
+# users:
+#   - name: bob
+#     sudo: false
+#     keys: ["ssh-ed25519 AAAA..."]

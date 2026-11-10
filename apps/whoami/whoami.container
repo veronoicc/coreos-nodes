@@ -1,0 +1,12 @@
+[Unit]
+Description=whoami example
+
+[Container]
+Image=docker.io/traefik/whoami
+PublishPort=127.0.0.1:8080:80
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

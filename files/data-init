@@ -1,0 +1,31 @@
+#!/bin/bash
+# Prepare the persistent data partition mounted at /var/data. Idempotent; runs
+# on every boot after var-data.mount and before the bind mounts and sshd.
+set -euo pipefail
+
+data=/var/data
+
+# New dirs copy the SELinux label of a reference path (no-op without SELinux).
+label_like() {
+    if selinuxenabled; then chcon --reference="$1" "$2"; fi
+}
+
+mkdir_once() { # <mode> <dir> <label reference>
+    [ -d "$2" ] && return 0
+    install -d -m "$1" "$2"
+    label_like "$3" "$2"
+}
+
+if selinuxenabled; then restorecon "$data"; fi
+
+mkdir_once 0755 "$data/containers" /var/lib/containers
+mkdir_once 0755 "$data/netbird" /var/lib/netbird
+mkdir_once 0700 "$data/secrets" "$data"
+mkdir_once 0755 "$data/ssh" /etc/ssh
+
+# SSH host keys live on the data partition so they survive an OS reinstall.
+key=$data/ssh/ssh_host_ed25519_key
+if [ ! -e "$key" ]; then
+    ssh-keygen -q -t ed25519 -N '' -C '' -f "$key"
+    if selinuxenabled; then chcon -t sshd_key_t "$key"; fi
+fi

@@ -1,0 +1,17 @@
+# Shared by all nodes. Per-node settings live in nodes/<name>.yml.
+node_domain: node.veronoi.cc
+
+# Public GitHub repo URL the nodes sync apps/ from, e.g. https://github.com/<owner>/<repo>
+# REQUIRED: the build fails while this is empty. CI exports REPO_URL for the
+# repo it runs in, which takes precedence over this value.
+repo_url: ""
+
+branch: main
+data_label: data
+root_size_gib: 20
+
+users:
+  - name: veronoicc
+    sudo: true
+    keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMVEk4+GJmigi3x7gS+fszh+FXIBJ1rIelHzzWd7pUJW

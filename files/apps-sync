@@ -1,0 +1,185 @@
+#!/bin/bash
+# Reconcile apps/<name>/* from the repo into the Quadlet directory.
+#   apps-sync              download the repo tarball and reconcile all apps
+#   apps-sync reset <app>  wipe <app>'s container + volumes and redeploy it
+# Env: APPS_REPO_URL, APPS_BRANCH (from /etc/apps-sync.env on the node),
+#      APPS_SRC_DIR (local repo root instead of downloading; for tests),
+#      APPS_DIR (managed dir), APPS_LOCK (lock file).
+set -euo pipefail
+
+APPS_DIR=${APPS_DIR:-/etc/containers/systemd/apps}
+APPS_LOCK=${APPS_LOCK:-/run/apps-sync.lock}
+APPS_BRANCH=${APPS_BRANCH:-main}
+
+die() { echo "apps-sync: $*" >&2; exit 1; }
+
+# Quadlet file extension -> unit suffix (see podman-systemd.unit(5)).
+unit_suffix() {
+    case $1 in
+        container | kube) echo ".service" ;;
+        volume) echo "-volume.service" ;;
+        network) echo "-network.service" ;;
+        pod) echo "-pod.service" ;;
+        build) echo "-build.service" ;;
+        image) echo "-image.service" ;;
+        *) return 1 ;;
+    esac
+}
+
+# unit_of <file>: unit name for a Quadlet file, empty for other files.
+unit_of() {
+    local f=${1##*/} suffix
+    suffix=$(unit_suffix "${f##*.}") || return 0
+    echo "${f%.*}$suffix"
+}
+
+# Restart order: networks, volumes, everything else, containers/kube last.
+rank() {
+    case ${1##*.} in
+        network) echo 0 ;;
+        volume) echo 1 ;;
+        container | kube | pod) echo 3 ;;
+        *) echo 2 ;;
+    esac
+}
+
+# setting <file> <Key>: first value of Key= in a Quadlet file.
+setting() { sed -n "s/^$2=//p" "$1" | head -n1; }
+
+# Per-run state.
+declare -a CHANGED=() # "<app>/<file>" copied or updated
+REMOVED=0
+
+fetch() {
+    local work=$1
+    if [ -n "${APPS_SRC_DIR:-}" ]; then
+        SRC=$APPS_SRC_DIR
+        return
+    fi
+    [ -n "${APPS_REPO_URL:-}" ] || die "APPS_REPO_URL is not set (see /etc/apps-sync.env)"
+    curl -fsSL --retry 3 --max-time 120 -o "$work/repo.tar.gz" \
+        "${APPS_REPO_URL%/}/archive/refs/heads/$APPS_BRANCH.tar.gz"
+    mkdir "$work/repo"
+    tar -xzf "$work/repo.tar.gz" -C "$work/repo" --strip-components=1
+    SRC=$work/repo
+}
+
+# deploy <app>...: copy changed files of the given apps, record them.
+deploy() {
+    local app f dest
+    for app in "$@"; do
+        for f in "$SRC/apps/$app"/*; do
+            [ -f "$f" ] && [ ! -L "$f" ] || continue
+            dest=$APPS_DIR/$app/${f##*/}
+            if ! cmp -s "$f" "$dest"; then
+                install -D -m 0644 "$f" "$dest"
+                CHANGED+=("$app/${f##*/}")
+            fi
+        done
+    done
+}
+
+# prune: remove managed files whose repo counterpart vanished, stop their units.
+prune() {
+    local d f app name unit
+    [ -d "$APPS_DIR" ] || return 0
+    for d in "$APPS_DIR"/*/; do
+        [ -d "$d" ] || continue
+        app=$(basename "$d")
+        for f in "$d"*; do
+            [ -e "$f" ] || continue
+            name=${f##*/}
+            [ -f "$SRC/apps/$app/$name" ] && continue
+            unit=$(unit_of "$name")
+            [ -z "$unit" ] || systemctl stop "$unit" || true
+            rm -f "$f"
+            REMOVED=1
+        done
+        rmdir "$d" 2> /dev/null || true
+    done
+}
+
+# units_to_restart: unit names for CHANGED files, ordered by rank.
+units_to_restart() {
+    local c app name unit g
+    for c in "${CHANGED[@]}"; do
+        app=${c%%/*}
+        name=${c#*/}
+        unit=$(unit_of "$name")
+        if [ -n "$unit" ]; then
+            echo "$(rank "$name") $unit"
+        else # plain file (env file, config): restart the app's containers
+            for g in "$APPS_DIR/$app"/*.container; do
+                [ -f "$g" ] && echo "3 $(unit_of "$g")"
+            done
+        fi
+    done | sort -u -k1,1n -k2,2 | cut -d' ' -f2
+}
+
+reconcile() {
+    local app unit
+    [ -d "$SRC/apps" ] || die "no apps/ directory in the repo, refusing to reconcile"
+    local -a apps=()
+    for app in "$SRC/apps"/*/; do
+        [ -d "$app" ] && apps+=("$(basename "$app")")
+    done
+    if [ "${#apps[@]}" -gt 0 ]; then deploy "${apps[@]}"; fi
+    prune
+    [ "${#CHANGED[@]}" -gt 0 ] || [ "$REMOVED" -eq 1 ] || return 0
+    systemctl daemon-reload
+    if [ "${#CHANGED[@]}" -gt 0 ]; then
+        while read -r unit; do
+            systemctl restart "$unit"
+        done < <(units_to_restart)
+    fi
+}
+
+# ranked_files <dir> <sort flags>: regular files of an app dir ordered by rank.
+ranked_files() {
+    local f
+    for f in "$1"/*; do
+        [ -f "$f" ] && echo "$(rank "$f") $f"
+    done | sort "$2" | cut -d' ' -f2-
+}
+
+reset() {
+    local app=$1 dir name unit f
+    dir=$SRC/apps/$app
+    [ -d "$dir" ] || die "no app '$app' in the repo"
+    # Stop containers first, then volumes/networks.
+    while read -r f; do
+        unit=$(unit_of "$f")
+        [ -z "$unit" ] || systemctl stop "$unit" || true
+    done < <(ranked_files "$dir" -rn)
+    for f in "$dir"/*.container; do
+        [ -f "$f" ] || continue
+        name=$(setting "$f" ContainerName)
+        podman rm -f --ignore "${name:-systemd-$(basename "${f%.*}")}"
+    done
+    for f in "$dir"/*.volume; do
+        [ -f "$f" ] || continue
+        name=$(setting "$f" VolumeName)
+        podman volume rm -f "${name:-systemd-$(basename "${f%.*}")}"
+    done
+    deploy "$app"
+    systemctl daemon-reload
+    while read -r f; do
+        unit=$(unit_of "$f")
+        [ -z "$unit" ] || systemctl start "$unit"
+    done < <(ranked_files "$dir" -n)
+}
+
+main() {
+    exec 9> "$APPS_LOCK"
+    flock 9
+    work=$(mktemp -d) # global: the EXIT trap runs after main returns
+    trap 'rm -rf "$work"' EXIT
+    fetch "$work"
+    case ${1:-sync} in
+        sync) reconcile ;;
+        reset) [ -n "${2:-}" ] || die "usage: apps-sync reset <app>"; reset "$2" ;;
+        *) die "usage: apps-sync [reset <app>]" ;;
+    esac
+}
+
+main "$@"
