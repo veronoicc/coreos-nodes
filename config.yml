@@ -8,7 +8,10 @@ repo_url: "https://github.com/veronoicc/coreos-nodes"
 
 branch: main
 data_label: data
-root_size_gib: 20
+# Root filesystem size. The rest of the disk becomes the `data` partition, so
+# root_size_gib + 1 GiB boot area + at least 2 GiB data must fit on the smallest
+# node's disk (set `disk_gib` in nodes/<name>.yml to have the build check this).
+root_size_gib: 8
 
 users:
   - name: veronoicc

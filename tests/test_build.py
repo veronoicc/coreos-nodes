@@ -3,7 +3,7 @@ import json
 import pytest
 
 import build
-from conftest import KEY, REPO, base_config, base_node, build_ign, ign_file
+from conftest import KEY, REPO, ROOT, base_config, base_node, build_ign, ign_file
 
 
 @pytest.mark.parametrize("bad", [None, "", "   "])
@@ -193,3 +193,27 @@ def test_installer_config_saves_data_partition():
     import yaml
     cfg = yaml.safe_load(build.installer_config(base_config(data_label="stuff")))
     assert cfg == {"save-partlabel": ["stuff"]}
+
+
+def test_disk_smaller_than_root_plus_data_rejected():
+    # Reproduces the real first-boot failure: root_size_gib=20 on a 20 GiB disk made
+    # ignition-disks fail in the initrd ("Could not create partition 4").
+    with pytest.raises(build.ConfigError, match="disk_gib"):
+        build.render(base_config(root_size_gib=20), "ecstasy", base_node(disk_gib=20))
+
+
+def test_disk_just_big_enough_accepted():
+    need = 20 + build.BOOT_AREA_GIB + build.MIN_DATA_GIB
+    build.render(base_config(root_size_gib=20), "ecstasy", base_node(disk_gib=need))
+    with pytest.raises(build.ConfigError):
+        build.render(base_config(root_size_gib=20), "ecstasy", base_node(disk_gib=need - 1))
+
+
+def test_no_disk_gib_means_no_check():
+    build.render(base_config(root_size_gib=20), "ecstasy", base_node())
+
+
+def test_repo_defaults_fit_a_20gib_disk():
+    cfg = build.load_config()
+    build.render(build.load_yaml(ROOT / "config.yml"), "ecstasy", build.load_node("ecstasy") | {"disk_gib": 20}, ROOT)
+    assert cfg["root_size_gib"] + build.BOOT_AREA_GIB + build.MIN_DATA_GIB <= 20

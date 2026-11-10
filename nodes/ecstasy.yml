@@ -5,6 +5,11 @@
 # that ISO WIPES this disk without asking. Must be right for this machine.
 device: /dev/vda
 
+# Disk size in GiB (usable, as `lsblk -b` shows divided by 2^30; a "20 GB" plan is
+# often less than 20 GiB). Optional: when set, the build fails if root_size_gib
+# (config.yml) + boot area + minimum data partition do not fit.
+# disk_gib: 20
+
 # Extra users on top of config.yml (same shape):
 # users:
 #   - name: bob

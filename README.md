@@ -5,7 +5,7 @@ custom installer ISO, built by GitHub Actions on every change. Nodes are
 installed to disk (no live-in-RAM design), so small servers work.
 
 - `config.yml`: shared settings (`node_domain`, `repo_url`, `branch`, `data_label`, `root_size_gib`, `users`).
-- `nodes/<name>.yml`: one file per node (`device`, optional `hostname`, optional extra `users`). Hostname is `<name>.<node_domain>`.
+- `nodes/<name>.yml`: one file per node (`device`, optional `disk_gib`, optional `hostname`, optional extra `users`). Hostname is `<name>.<node_domain>`.
 - `build.py`: renders Butane, runs `butane --strict` and `ignition-validate` (podman containers) -> `build/<node>.ign`.
 - `files/`: scripts baked into the Ignition (`apps-sync`, `data-init`).
 - `apps/<name>/*`: Quadlet apps (flat dir per app). NOT baked in; synced onto nodes at runtime.
@@ -17,6 +17,11 @@ partition labelled `data` on the rest of the disk mounted at `/var/data`.
 `/var/lib/containers`, `/var/lib/netbird`, the SSH host key (`/var/data/ssh`) and
 `/var/data/secrets` (0700) live on that partition. NetBird runs as a Quadlet that
 only starts once `/var/data/secrets/netbird.env` exists. Zincati auto-updates stay on.
+
+**Disk size:** root is `root_size_gib` (default 8, FCOS needs about 8 GiB), plus about 1 GiB boot area, plus a `data`
+partition on the rest. The disk must be at least `root_size_gib + 3` GiB, otherwise Ignition fails at first boot with
+"Failed to mount sysroot" (the installer itself does not notice). A "20 GB" plan is often under 20 GiB: check with
+`lsblk -b` (divide by 2^30) and set `disk_gib` in `nodes/<name>.yml` so the build rejects a layout that cannot fit.
 
 ## Install a node
 

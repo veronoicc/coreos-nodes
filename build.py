@@ -24,6 +24,9 @@ DATA = "/var/data"
 BOOT_DISK = "/dev/disk/by-id/coreos-boot-disk"
 SECRETS_ENV = f"{DATA}/secrets/netbird.env"
 ROOT_PARTITION = 4  # FCOS root is partition 4; data must come after it
+# Root starts 513 MiB into the disk (partitions 1-3: BIOS boot, ESP, /boot); round up.
+BOOT_AREA_GIB = 1
+MIN_DATA_GIB = 2
 
 
 class BuildError(Exception):
@@ -50,7 +53,7 @@ def load_config_dict(config):
         )
     cfg.setdefault("branch", "main")
     cfg.setdefault("data_label", "data")
-    cfg.setdefault("root_size_gib", 20)
+    cfg.setdefault("root_size_gib", 8)
     cfg.setdefault("users", [])
     if not cfg.get("node_domain"):
         raise ConfigError("node_domain is missing or empty in config.yml")
@@ -198,6 +201,17 @@ def render(config, name, node, root=ROOT):
     cfg = load_config_dict(config)
     hostname = node.get("hostname") or f"{name}.{cfg['node_domain']}"
     root_mib = int(cfg["root_size_gib"]) * 1024
+    disk = node.get("disk_gib")
+    if disk is not None:
+        need = int(cfg["root_size_gib"]) + BOOT_AREA_GIB + MIN_DATA_GIB
+        if int(disk) < need:
+            # Otherwise ignition-disks fails in the initrd on first boot ("Could not create
+            # partition 4") and the console only shows "Failed to mount /sysroot".
+            raise ConfigError(
+                f"{name}: disk_gib={disk} is too small: root_size_gib={cfg['root_size_gib']} + "
+                f"{BOOT_AREA_GIB} GiB boot area + {MIN_DATA_GIB} GiB data needs {need} GiB. "
+                "Lower root_size_gib in config.yml."
+            )
     label = cfg["data_label"]
     files = Path(root) / "files"
     return {
