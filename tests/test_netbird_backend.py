@@ -1,8 +1,5 @@
-"""Self-hosted NetBird backend: Quadlet lint and init script (fake ssh, no node)."""
-import os
+"""Self-hosted NetBird backend: everything is declarative (apps-sync files + one SOPS file), so lint the repo files."""
 import re
-import stat
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -11,16 +8,17 @@ import yaml
 from conftest import ROOT
 
 APP = ROOT / "apps" / "netbird-backend"
-INIT = ROOT / "scripts" / "init-netbird-backend.sh"
 BASE = "/var/data/netbird-backend"
+SYNCED = "/etc/containers/systemd/apps/netbird-backend"
 DOMAIN = "netbird.veronoi.cc"
-EMAIL = "admin@example.org"
 SUBNET = "172.30.0.0/24"
+CONFIG = f"{BASE}/config.yaml"
 CONTAINERS = {
-    "netbird-server": {"gate": f"{BASE}/config.yaml", "ports": {"3478:3478/udp"}},
-    "netbird-dashboard": {"gate": f"{BASE}/dashboard.env", "ports": set()},
-    "netbird-traefik": {"gate": f"{BASE}/traefik.yml", "ports": {"80:80", "443:443"}},
+    "netbird-server": {"ports": {"3478:3478/udp"}},
+    "netbird-dashboard": {"ports": set()},
+    "netbird-traefik": {"ports": {"80:80", "443:443"}},
 }
+VOLUMES = {"netbird-data": "/var/lib/netbird", "netbird-letsencrypt": "/letsencrypt"}
 
 
 def parse_quadlet(path):
@@ -43,14 +41,22 @@ def parse_quadlet(path):
 
 def test_app_files():
     names = {p.name for p in APP.iterdir()}
-    assert names == {f"{c}.container" for c in CONTAINERS} | {"netbird-backend.network", "traefik-dynamic.yml"}
+    assert names == (
+        {f"{c}.container" for c in CONTAINERS}
+        | {f"{v}.volume" for v in VOLUMES}
+        | {"netbird-backend.network", "traefik-dynamic.yml", "traefik.yml", "dashboard.env", "README.md"}
+    )
+
+
+def test_no_helper_script_is_needed():
+    assert not list((ROOT / "scripts").glob("*netbird*"))
 
 
 @pytest.mark.parametrize("name", CONTAINERS)
 def test_container_hygiene(name):
     q = parse_quadlet(APP / f"{name}.container")
     spec = CONTAINERS[name]
-    assert q["Unit"]["ConditionPathExists"] == [spec["gate"]]
+    assert q["Unit"]["ConditionPathExists"] == [CONFIG]  # same gate for all three, see test_gating_*
     assert q["Unit"]["RequiresMountsFor"] == ["/var/data"]
     assert q["Install"]["WantedBy"] == ["multi-user.target"]
     assert q["Service"]["Restart"] == ["on-failure"]
@@ -62,9 +68,12 @@ def test_container_hygiene(name):
     image = c["Image"][0]
     assert re.fullmatch(r"docker\.io/[\w/.-]+:[\w.-]+", image) and not image.endswith(":latest"), image
     for v in c.get("Volume", []):
-        src, _, rest = v.partition(":")
-        assert src.startswith((BASE + "/", "/etc/containers/systemd/apps/netbird-backend/")), v
-        assert re.search(r"(^|,)[zZ](,|$)", rest.split(":", 1)[1]), f"SELinux label missing: {v}"
+        src = v.split(":")[0]
+        if src.endswith(".volume"):
+            assert src[: -len(".volume")] in VOLUMES, v
+        else:
+            assert src in (CONFIG, f"{SYNCED}/traefik.yml", f"{SYNCED}/traefik-dynamic.yml"), v
+            assert re.search(r"(^|,)[zZ](,|$)", v.split(":", 2)[2]), f"SELinux label missing: {v}"
 
 
 def test_images_pinned():
@@ -74,23 +83,62 @@ def test_images_pinned():
     assert re.fullmatch(r"docker\.io/netbirdio/dashboard:v\d+\.\d+\.\d+", img["netbird-dashboard"])
 
 
-def test_ordering():
+def test_ordering_and_gating_are_consistent():
+    """All three units wait for the same file and start in order server, dashboard, traefik.
+
+    config.yaml is rendered by secrets-sync, which restarts all three listed units; without the gate Traefik would
+    request certificates (rate limited by Let's Encrypt) for a backend that is not configured yet."""
     t = parse_quadlet(APP / "netbird-traefik.container")["Unit"]
     for dep in ("netbird-server.service", "netbird-dashboard.service"):
         assert dep in t["After"][0].split() and dep in t["Wants"][0].split()
     assert "network-online.target" in parse_quadlet(APP / "netbird-server.container")["Unit"]["After"][0]
 
 
-def test_dashboard_env_file_and_traefik_static_config():
+def test_secrets_sync_target_matches_the_quadlets():
+    lines = [l.split() for l in (ROOT / "secrets" / "ecstasy" / "targets.conf").read_text().splitlines() if l.strip() and not l.startswith("#")]
+    file, dest, mode, owner, units = next(l for l in lines if l[0] == "netbird-server.yaml.sops")
+    assert (dest, mode, owner) == (CONFIG, "0600", "root:root")
+    assert set(units.split(",")) == {f"{c}.service" for c in CONTAINERS}  # every gated unit is (re)started when it appears
+    server = parse_quadlet(APP / "netbird-server.container")["Container"]["Volume"]
+    assert f"{CONFIG}:/etc/netbird/config.yaml:ro,Z" in server
+
+
+def test_state_lives_in_named_volumes():
+    server = parse_quadlet(APP / "netbird-server.container")["Container"]["Volume"]
+    assert "netbird-data.volume:/var/lib/netbird" in server
+    traefik = parse_quadlet(APP / "netbird-traefik.container")["Container"]["Volume"]
+    assert "netbird-letsencrypt.volume:/letsencrypt" in traefik
+    for text in (APP / "netbird-server.container", APP / "netbird-traefik.container"):
+        assert "/var/data/netbird-backend/netbird" not in text.read_text() and "letsencrypt:/letsencrypt:Z" not in text.read_text()
+
+
+@pytest.mark.parametrize("name", VOLUMES)
+def test_volumes_are_persistent_for_apps_sync_reset(name):
+    p = APP / f"{name}.volume"
+    assert "# apps-sync: keep" in p.read_text().splitlines()
+    assert parse_quadlet(p)["Volume"]["VolumeName"] == [name]
+
+
+def test_dashboard_env_file():
     d = parse_quadlet(APP / "netbird-dashboard.container")["Container"]
-    assert d["EnvironmentFile"] == [f"{BASE}/dashboard.env"]
-    t = parse_quadlet(APP / "netbird-traefik.container")["Container"]["Volume"]
-    assert f"{BASE}/traefik.yml:/etc/traefik/traefik.yml:ro,Z" in t
-    assert f"{BASE}/letsencrypt:/letsencrypt:Z" in t
-    assert "/etc/containers/systemd/apps/netbird-backend/traefik-dynamic.yml:/etc/traefik/dynamic.yml:ro,z" in t
-    s = parse_quadlet(APP / "netbird-server.container")["Container"]["Volume"]
-    assert f"{BASE}/netbird:/var/lib/netbird:Z" in s
-    assert f"{BASE}/config.yaml:/etc/netbird/config.yaml:ro,Z" in s
+    assert d["EnvironmentFile"] == [f"{SYNCED}/dashboard.env"]
+    env = dict(l.split("=", 1) for l in (APP / "dashboard.env").read_text().splitlines() if l and not l.startswith("#"))
+    assert env["NETBIRD_MGMT_API_ENDPOINT"] == f"https://{DOMAIN}"
+    assert env["NETBIRD_MGMT_GRPC_API_ENDPOINT"] == f"https://{DOMAIN}"
+    assert env["AUTH_AUTHORITY"] == f"https://{DOMAIN}/oauth2"
+    assert env["USE_AUTH0"] == "false" and env["AUTH_CLIENT_SECRET"] == ""
+    assert env["AUTH_CLIENT_ID"] == "netbird-dashboard" and env["LETSENCRYPT_DOMAIN"] == "none"
+
+
+def test_traefik_static_config():
+    cfg = yaml.safe_load((APP / "traefik.yml").read_text())
+    assert cfg["providers"] == {"file": {"filename": "/etc/traefik/dynamic.yml"}}  # no docker provider, no socket
+    assert cfg["entryPoints"]["web"]["http"]["redirections"]["entryPoint"] == {"to": "websecure", "scheme": "https"}
+    assert cfg["entryPoints"]["websecure"]["address"] == ":443"
+    acme = cfg["certificatesResolvers"]["letsencrypt"]["acme"]
+    assert acme == {"storage": "/letsencrypt/acme.json", "tlsChallenge": {}}  # no email: nothing personal in a public repo
+    for k in ("readTimeout", "writeTimeout", "idleTimeout"):
+        assert cfg["entryPoints"]["websecure"]["transport"]["respondingTimeouts"][k] == 0
 
 
 def test_network_unit():
@@ -104,7 +152,8 @@ def test_no_socket_mounts_or_secret_literals():
         assert not re.search(r"podman\.sock|docker\.sock|/run/podman|/var/run", text), p
         assert not re.search(r"(?=[A-Za-z0-9+/]*\d)(?=[A-Za-z0-9+/]*[A-Z])[A-Za-z0-9+/]{32,}", text), f"secret-looking literal in {p}"
         assert not re.search(r"(?i)^\s*(Environment|Secret)=.*(secret|password|key|token)", text, re.M), p
-        assert "@" not in text, f"email-like literal in {p}"
+        if p.name != "README.md":
+            assert "@" not in text, f"email-like literal in {p}"
 
 
 def test_dynamic_config_routes():
@@ -132,170 +181,35 @@ def test_dynamic_config_routes():
     assert url("netbird-dashboard") == "http://netbird-dashboard:80"
 
 
-# ------------------------------------------------------------ init script
+# ------------------------------------------------------ nothing secret in the repo
+
+SKIP_DIRS = {".git", ".venv", "build", "dist", "__pycache__", ".pytest_cache", ".ruff_cache"}
 
 
-@pytest.fixture
-def node(tmp_path):
-    """Fake ssh/sudo/chown/systemctl: the remote script runs locally against a sandbox dir."""
-    bin_ = tmp_path / "bin"
-    bin_.mkdir()
-    sandbox = tmp_path / "node"
-    sandbox.mkdir()
-    log = tmp_path / "calls.log"
-    (bin_ / "ssh").write_text(
-        "#!/bin/bash\n"
-        f'echo "ssh $*" >> {log}\n'
-        'shift  # host\n'
-        f'sed "s#{BASE}#{sandbox}/data#g" | bash -c "$*"\n'
-    )
-    for name in ("sudo",):
-        (bin_ / name).write_text('#!/bin/bash\nexec "$@"\n')
-    for name in ("chown", "systemctl"):
-        (bin_ / name).write_text(f'#!/bin/bash\necho "{name} $*" >> {log}\n')
-    for p in bin_.iterdir():
-        p.chmod(0o755)
-
-    def run(*args, env=None):
-        return subprocess.run(
-            [str(INIT), *args],
-            env={**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}", **(env or {})},
-            capture_output=True, text=True, timeout=60,
-        )
-
-    return {"run": run, "data": sandbox / "data", "log": log, "root": tmp_path}
+def repo_files():
+    for p in ROOT.rglob("*"):
+        if p.is_file() and not (set(p.relative_to(ROOT).parts) & SKIP_DIRS):
+            yield p
 
 
-def mode(p):
-    return stat.S_IMODE(p.stat().st_mode)
+def test_no_private_keys_or_plaintext_config_in_the_repo():
+    private = "AGE-SECRET" + "-KEY-"  # not contiguous: this file must not trip its own scan
+    pem = "-----BEGIN " + r"[A-Z ]*PRIVATE KEY"
+    for p in repo_files():
+        rel = p.relative_to(ROOT)
+        data = p.read_bytes()
+        assert private.encode() not in data, rel
+        assert not re.search(pem.encode(), data), rel
+        if rel.parts[0] != "tests":
+            # a plaintext NetBird config would carry these keys with a literal value
+            assert not re.search(rb"(?m)^\s*(encryptionKey|authSecret|sessionCookieEncryptionKey):\s*[\"']?[A-Za-z0-9+/=]{16,}", data), rel
+    assert not (APP / "config.yaml").exists() and not (ROOT / "secrets" / "ecstasy" / "config.yaml").exists()
 
 
-def secrets_of(cfg_path):
-    s = yaml.safe_load(cfg_path.read_text())["server"]
-    return s["authSecret"], s["store"]["encryptionKey"], s["auth"]["sessionCookieEncryptionKey"]
-
-
-def test_init_usage():
-    assert subprocess.run([str(INIT)], capture_output=True).returncode != 0
-
-
-@pytest.mark.parametrize("email", ["nope", "a b@example.org", "a'b@example.org", 'a"b@example.org', ""])
-def test_init_rejects_bad_email(node, email):
-    r = node["run"]("u@h", email)
-    assert r.returncode != 0
-    assert not node["data"].exists()
-
-
-def test_init_generates_files(node):
-    r = node["run"]("u@h", EMAIL)
-    assert r.returncode == 0, r.stderr
-    d = node["data"]
-    for f in ("config.yaml", "dashboard.env", "traefik.yml", "letsencrypt/acme.json"):
-        assert mode(d / f) == 0o600, f
-    for sub in ("", "netbird", "letsencrypt"):
-        assert mode(d / sub if sub else d) == 0o700, sub
-
-    cfg = yaml.safe_load((d / "config.yaml").read_text())["server"]
-    assert cfg["exposedAddress"] == f"https://{DOMAIN}:443"
-    assert cfg["stunPorts"] == [3478]
-    assert cfg["listenAddress"] == ":80"
-    assert cfg["dataDir"] == "/var/lib/netbird"
-    assert cfg["store"]["engine"] == "sqlite"
-    assert cfg["auth"]["issuer"] == f"https://{DOMAIN}/oauth2"
-    assert cfg["auth"]["dashboardRedirectURIs"] == [f"https://{DOMAIN}/nb-auth", f"https://{DOMAIN}/nb-silent-auth"]
-    assert cfg["reverseProxy"]["trustedHTTPProxies"] == [SUBNET]
-    for s in secrets_of(d / "config.yaml"):
-        assert len(s) >= 32
-
-    env = dict(l.split("=", 1) for l in (d / "dashboard.env").read_text().splitlines() if "=" in l)
-    assert env["NETBIRD_MGMT_API_ENDPOINT"] == f"https://{DOMAIN}"
-    assert env["AUTH_AUTHORITY"] == f"https://{DOMAIN}/oauth2"
-    assert env["AUTH_CLIENT_ID"] == "netbird-dashboard"
-
-    t = yaml.safe_load((d / "traefik.yml").read_text())
-    assert t["certificatesResolvers"]["letsencrypt"]["acme"] == {
-        "email": EMAIL, "storage": "/letsencrypt/acme.json", "tlsChallenge": {},
-    }
-    ep = t["entryPoints"]
-    assert ep["web"]["address"] == ":80" and ep["websecure"]["address"] == ":443"
-    assert ep["web"]["http"]["redirections"]["entryPoint"] == {"to": "websecure", "scheme": "https"}
-    assert ep["websecure"]["transport"]["respondingTimeouts"]["readTimeout"] == 0
-    assert t["providers"] == {"file": {"filename": "/etc/traefik/dynamic.yml"}}
-
-    log = node["log"].read_text()
-    assert "chown root:root" in log
-    assert "systemctl start apps-sync.service" in log
-    assert re.search(r"systemctl start netbird-server\.service netbird-dashboard\.service netbird-traefik\.service", log)
-
-
-def test_init_prints_dns_firewall_and_next_steps(node):
-    out = node["run"]("u@h", EMAIL).stdout
-    for needle in (DOMAIN, "A record", "80", "443", "3478/udp", f"https://{DOMAIN}/setup",
-                   "node-key.sh", "add-node.sh", "sops", "secrets-sync", "setup key"):
-        assert needle in out, needle
-    secrets = secrets_of(node["data"] / "config.yaml")
-    assert not any(s in out for s in secrets)
-
-
-def test_init_idempotent_and_force(node):
-    node["run"]("u@h", EMAIL)
-    cfg = node["data"] / "config.yaml"
-    first = cfg.read_bytes()
-    old_secrets = secrets_of(cfg)
-    r = node["run"]("u@h", "other@example.org")
-    assert r.returncode == 0
-    assert cfg.read_bytes() == first
-    assert EMAIL in (node["data"] / "traefik.yml").read_text()
-    assert "kept" in r.stdout
-    assert not list(node["data"].glob("*.bak-*"))
-
-    r = node["run"]("--force", "u@h", "other@example.org")
-    assert r.returncode == 0, r.stderr
-    assert cfg.read_bytes() != first
-    assert set(secrets_of(cfg)).isdisjoint(old_secrets)
-    assert "other@example.org" in (node["data"] / "traefik.yml").read_text()
-    baks = list(node["data"].glob("config.yaml.bak-*"))
-    assert len(baks) == 1 and baks[0].read_bytes() == first and mode(baks[0]) == 0o600
-    assert "encryption key" in r.stderr.lower()
-    assert "systemctl restart netbird-server.service" in node["log"].read_text()
-
-
-def test_init_keeps_acme_json_content(node):
-    node["run"]("u@h", EMAIL)
-    acme = node["data"] / "letsencrypt" / "acme.json"
-    acme.write_text('{"cert":1}')
-    node["run"]("u@h", EMAIL)
-    assert acme.read_text() == '{"cert":1}'
-    node["run"]("--force", "u@h", EMAIL)
-    assert acme.read_text() == '{"cert":1}'
-
-
-def test_init_secrets_distinct_per_run_and_not_in_repo(node, tmp_path_factory):
-    node["run"]("u@h", EMAIL)
-    a = secrets_of(node["data"] / "config.yaml")
-    assert len(set(a)) == 3
-    node["run"]("--force", "u@h", EMAIL)
-    b = secrets_of(node["data"] / "config.yaml")
-    assert set(a).isdisjoint(b)
-    committed = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True).stdout.split()
-    untracked = subprocess.run(["git", "ls-files", "-o", "--exclude-standard"], cwd=ROOT, capture_output=True, text=True).stdout.split()
-    blob = "".join((ROOT / f).read_text(errors="ignore") for f in committed + untracked if (ROOT / f).is_file())
-    assert not any(s in blob for s in a + b)
-
-
-def test_init_tolerates_failed_sync_when_units_exist(node):
-    (node["root"] / "bin" / "systemctl").write_text(
-        f'#!/bin/bash\necho "systemctl $*" >> {node["log"]}\n[ "$2" = apps-sync.service ] && exit 1\nexit 0\n'
-    )
-    r = node["run"]("u@h", EMAIL)
-    assert r.returncode == 0, r.stderr
-    assert "apps-sync" in r.stderr
-    assert "systemctl start netbird-server.service" in node["log"].read_text()
-
-
-def test_init_without_deployed_units_fails_with_hint(node):
-    (node["root"] / "bin" / "systemctl").write_text('#!/bin/bash\n[ "$1" = cat ] && exit 1\nexit 0\n')
-    r = node["run"]("u@h", EMAIL)
-    assert r.returncode != 0
-    assert "apps-sync" in r.stderr
-    assert (node["data"] / "config.yaml").exists()  # files are kept; rerun after the sync works
+def test_every_committed_sops_file_is_ciphertext():
+    for p in (ROOT / "secrets").rglob("*.sops"):
+        text = p.read_text()
+        assert "ENC[AES256_GCM" in text and "age1" in text, p
+        if p.name.endswith(".env.sops"):
+            for line in text.splitlines():
+                assert line.startswith("sops_") or re.match(r"[A-Za-z_][A-Za-z0-9_]*=ENC\[AES256_GCM,", line), f"plaintext line in {p}"

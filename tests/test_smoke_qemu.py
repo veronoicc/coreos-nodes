@@ -226,7 +226,7 @@ def test_secrets_sync_renders_netbird_env_and_restarts_unit(vm, tmp_path, real_t
     subprocess.run(  # throwaway admin key + the VM's own public key as recipients; the VM's private key never leaves it
         [real_tools.sops, "--encrypt", "--age", f"{admin_pub},{pub}", "--input-type", "dotenv", "--output-type", "dotenv",
          "--output", src / "secrets" / "ecstasy" / "netbird.env.sops", plain],
-        env={**os.environ, "HOME": str(tmp_path)}, check=True, capture_output=True,
+        env={**os.environ, "HOME": str(tmp_path)}, cwd=tmp_path, check=True, capture_output=True,  # cwd: the repo's .sops.yaml has no rule for temp paths
     )
     put_repo_secrets(vm, src)
     r = ssh(*SYNC, check=False)
@@ -241,3 +241,137 @@ def test_secrets_sync_renders_netbird_env_and_restarts_unit(vm, tmp_path, real_t
     r = ssh(*SYNC)
     assert ssh("systemctl", "show", "-p", "ActiveEnterTimestampMonotonic", "netbird.service").stdout == before
     assert "updated" not in r.stdout + r.stderr
+
+
+BACKEND_UNITS = ("netbird-server.service", "netbird-dashboard.service", "netbird-traefik.service")
+NB_HOST = "netbird.veronoi.cc"
+
+
+def readme_recipe():
+    """The sops recipe from apps/netbird-backend/README.md, verbatim (the first fenced block that starts with printf)."""
+    text = (ROOT / "apps" / "netbird-backend" / "README.md").read_text()
+    block = text.split("```\nprintf 'server:", 1)[1].split("\n```", 1)[0]
+    return "printf 'server:" + block
+
+
+def test_netbird_backend_is_declarative(vm, tmp_path, real_tools):
+    """apps (APPS_SRC_DIR) + the README recipe's encrypted config (SECRETS_SRC_DIR) bring the backend up, nothing else."""
+    ssh = vm["ssh"]
+    sudo = lambda *a, **k: ssh("sudo", *a, **k)  # noqa: E731
+    src = tmp_path / "src"
+    shutil.copytree(ROOT / "apps", src / "apps")
+    (src / "secrets" / "ecstasy").mkdir(parents=True)
+    shutil.copy(ROOT / "secrets" / "tools.version", src / "secrets" / "tools.version")
+    shutil.copy(ROOT / "secrets" / "ecstasy" / "targets.conf", src / "secrets" / "ecstasy" / "targets.conf")
+
+    def push():
+        ssh("rm", "-rf", "/tmp/src")
+        ssh("mkdir", "-p", "/tmp/src")
+        scp(vm, str(src / "apps"), str(src / "secrets"), "smoke@127.0.0.1:/tmp/src/")
+
+    apps_sync = ("sudo", "APPS_SRC_DIR=/tmp/src", "/usr/local/bin/apps-sync")
+
+    def units(prop):
+        return {u: ssh("systemctl", "show", "-p", prop, u).stdout.strip() for u in BACKEND_UNITS}
+
+    def wait_active(timeout=300):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if all(v == "ActiveState=active" for v in units("ActiveState").values()):
+                return
+            time.sleep(5)
+        logs = sudo("journalctl", "--no-pager", "-n", "60", "-u", "netbird-server", "-u", "netbird-dashboard", "-u", "netbird-traefik", check=False).stdout
+        pytest.fail(f"backend not active: {units('ActiveState')}\n{logs}")
+
+    def curl(*args):
+        return ssh("curl", "-sk", "--max-time", "10", "--resolve", f"{NB_HOST}:443:127.0.0.1", *args, check=False).stdout
+
+    # 1. apps only: files deployed, README not, units gated, volumes created, no config.yaml yet
+    push()
+    r = ssh(*apps_sync, check=False)
+    assert r.returncode == 0, r.stderr
+    d = "/etc/containers/systemd/apps/netbird-backend"
+    for f in ("dashboard.env", "traefik.yml", "traefik-dynamic.yml", "netbird-data.volume", "netbird-server.container"):
+        ssh("test", "-f", f"{d}/{f}")
+    ssh("test", "!", "-e", f"{d}/README.md")
+    for state in units("ConditionResult").values():
+        assert state == "ConditionResult=no", state
+    assert "ActiveState=inactive" in units("ActiveState")["netbird-server.service"]
+    vols = sudo("podman", "volume", "ls", "--format", "{{.Name}}").stdout.split()
+    assert "netbird-data" in vols and "netbird-letsencrypt" in vols, vols
+
+    # 2. the README recipe against the VM's real age key, throwaway admin key
+    pub = sudo("cat", "/var/data/secrets/age.pub").stdout.strip()
+    admin = tmp_path / "admin.key"
+    subprocess.run([real_tools.age_keygen, "-o", admin], check=True, capture_output=True)
+    admin_pub = subprocess.run([real_tools.age_keygen, "-y", admin], check=True, capture_output=True, text=True).stdout.strip()
+    (src / ".sops.yaml").write_text(f"creation_rules:\n  - path_regex: secrets/ecstasy/.*\n    age: >-\n      {admin_pub},{pub}\n")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "sops").symlink_to(real_tools.sops)
+    r = subprocess.run(["bash", "-c", readme_recipe()], cwd=src, capture_output=True, text=True,
+                       env={**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}", "HOME": str(tmp_path)})
+    assert r.returncode == 0, r.stderr
+    assert [p.name for p in (src / "secrets" / "ecstasy").glob("netbird-server*")] == ["netbird-server.yaml.sops"]
+    assert "authSecret: ENC[" in (src / "secrets" / "ecstasy" / "netbird-server.yaml.sops").read_text()
+    push()
+    r = ssh(*SYNC, check=False)
+    assert r.returncode == 0, r.stderr
+    assert "skipping netbird.env.sops" in r.stderr  # not in this throwaway repo: skipped, nothing else breaks
+    assert sudo("stat", "-c", "%a %U:%G", f"/var/data/netbird-backend/config.yaml").stdout.strip() == "600 root:root"
+    assert "authSecret" not in r.stdout + r.stderr
+
+    # 3. everything comes up and stays up. The first start of the server takes a while (it downloads the GeoLite
+    # database and migrates its databases), Traefik answers 502 until it listens: wait for the API, then watch.
+    wait_active()
+    deadline = time.time() + 300
+    while curl("-o", "/dev/null", "-w", "%{http_code}", f"https://{NB_HOST}/api/users") != "401":
+        assert time.time() < deadline, "the server never answered through Traefik"
+        time.sleep(5)
+    time.sleep(20)
+    assert all(v == "ActiveState=active" for v in units("ActiveState").values()), units("ActiveState")
+    assert all(v == "NRestarts=0" for v in units("NRestarts").values()), units("NRestarts")
+
+    # 4. routing
+    assert curl("-o", "/dev/null", "-w", "%{http_code}", f"https://{NB_HOST}/") == "200"
+    assert curl("-o", "/dev/null", "-w", "%{http_code}", f"https://{NB_HOST}/api/users") in {"401", "403"}  # the server, not the dashboard SPA
+    assert f"https://{NB_HOST}/oauth2" in curl(f"https://{NB_HOST}/oauth2/.well-known/openid-configuration")
+    grpc = curl("--http2", "-X", "POST", "-H", "content-type: application/grpc", "-o", "/dev/null", "-D", "-",
+                f"https://{NB_HOST}/management.ManagementService/GetServerKey").lower()
+    assert "application/grpc" in grpc or "grpc-status" in grpc, grpc
+    ws = curl("--http1.1", "-i", "--max-time", "5", "-H", "Connection: Upgrade", "-H", "Upgrade: websocket", "-H", "Sec-WebSocket-Version: 13",
+              "-H", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", f"https://{NB_HOST}/relay")
+    assert ws.startswith("HTTP/1.1 101"), ws[:200]
+    redirect = ssh("curl", "-s", "-o", "/dev/null", "-w", "%{http_code} %{redirect_url}", "-H", f"Host: {NB_HOST}", "http://127.0.0.1/").stdout
+    assert redirect.split()[0] in {"301", "308"} and redirect.split()[1] == f"https://{NB_HOST}/", redirect
+
+    # 5. named volumes hold the state; Traefik handled acme.json itself (no root mkdir/chmod anywhere)
+    mount = sudo("podman", "volume", "inspect", "-f", "{{.Mountpoint}}", "netbird-letsencrypt").stdout.strip()
+    assert mount.startswith("/var/lib/containers/storage/volumes/"), mount
+    assert sudo("stat", "-c", "%a %U", f"{mount}/acme.json").stdout.strip() == "600 root"  # created by Traefik itself
+    print("letsencrypt volume:", sudo("sh", "-c", f"ls -l {mount}", check=False).stdout)
+    data = sudo("podman", "volume", "inspect", "-f", "{{.Mountpoint}}", "netbird-data").stdout.strip()
+    assert sudo("sh", "-c", f"ls {data}").stdout.split(), "netbird-data volume is empty"
+    print("netbird-data volume:", sudo("sh", "-c", f"ls -l {data}", check=False).stdout)
+    print("selinux:", sudo("sh", "-c", f"ls -dZ {data} {mount}", check=False).stdout)
+    avc = sudo("sh", "-c", "ausearch -m avc -ts boot 2>/dev/null | grep -c netbird || true", check=False).stdout.strip()
+    print("netbird AVC denials since boot:", avc)
+
+    # 6. second sync of both restarts nothing
+    before = units("ActiveEnterTimestampMonotonic")
+    ssh(*apps_sync)
+    r = ssh(*SYNC)
+    assert "updated" not in r.stdout + r.stderr
+    assert units("ActiveEnterTimestampMonotonic") == before
+
+    # 7. reset keeps the persistent volumes; --include-persistent wipes them
+    sudo("touch", f"{data}/keep-me")
+    r = ssh(*apps_sync, "reset", "netbird-backend", check=False)
+    assert r.returncode == 0, r.stderr
+    assert "kept persistent volume netbird-data" in r.stderr and "kept persistent volume netbird-letsencrypt" in r.stderr
+    sudo("test", "-e", f"{data}/keep-me")
+    wait_active()
+    r = ssh(*apps_sync, "reset", "--include-persistent", "netbird-backend", check=False)
+    assert r.returncode == 0, r.stderr
+    sudo("test", "!", "-e", f"{data}/keep-me")
+    wait_active()
