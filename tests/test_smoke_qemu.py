@@ -4,6 +4,7 @@ Opt-in: SMOKE_QCOW2=/path/to/fedora-coreos-*-qemu.x86_64.qcow2 pytest tests/test
 Download the image with the coreos-installer container (-s stable -p qemu -f qcow2.xz)
 and `xz -d` it. Uses KVM when /dev/kvm exists. Needs qemu-system-x86_64, qemu-img, ssh, podman.
 """
+import hashlib
 import os
 import shlex
 import shutil
@@ -120,7 +121,7 @@ def test_data_partition(vm):
     assert vm["ssh"]("lsblk", "-no", "PARTLABEL", out[0]).stdout.strip() == "data"
     root = vm["ssh"]("findmnt", "-no", "SOURCE", "/sysroot").stdout.strip()
     size = int(vm["ssh"]("lsblk", "-bno", "SIZE", root).stdout.split()[0])
-    assert size == 20 * 1024**3
+    assert size == build.load_yaml(ROOT / "config.yml")["root_size_gib"] * 1024**3
 
 
 def test_persistence(vm):
@@ -158,26 +159,86 @@ def test_apps_sync_deploys_whoami(vm):
     assert ssh("systemctl", "show", "-p", "ActiveEnterTimestampMonotonic", "whoami.service").stdout == before
 
 
-def test_push_secrets_starts_netbird(vm):
-    # ssh wrapper so the real script reaches the forwarded port with the throwaway key
+SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR"]
+NB_KEY = "00000000-0000-0000-0000-000000000000"
+# Stand-in for pass-cli inside the VM: real Proton Pass was never reachable from the smoke test.
+FAKE_PASS_CLI = f"""#!/bin/bash
+case $1 in
+login) [ -n "$PROTON_PASS_PERSONAL_ACCESS_TOKEN" ] && mkdir -p "$PROTON_PASS_SESSION_DIR" && : > "$PROTON_PASS_SESSION_DIR/ok" ;;
+logout) rm -f "$PROTON_PASS_SESSION_DIR/ok" ;;
+item) [ -f "$PROTON_PASS_SESSION_DIR/ok" ] && [ "$3" = pass://ecstasy/netbird/setup_key ] && echo {NB_KEY} ;;
+esac
+"""
+
+
+def scp(vm, *args):
+    subprocess.run(["scp", "-r", "-i", str(vm["key"]), "-P", str(vm["port"]), *SSH_OPTS, *args], check=True)
+
+
+def test_secrets_sync_units_and_clean_skip_without_token(vm):
+    ssh = vm["ssh"]
+    assert "ExecStart=/usr/local/bin/secrets-sync" in ssh("systemctl", "cat", "secrets-sync.service").stdout
+    assert "OnUnitActiveSec=15min" in ssh("systemctl", "cat", "secrets-sync.timer").stdout
+    assert ssh("systemctl", "is-enabled", "secrets-sync.timer").stdout.strip() == "enabled"
+    assert ssh("systemctl", "is-enabled", "secrets-sync.service").stdout.strip() == "enabled"
+    r = ssh("sudo", "systemctl", "start", "secrets-sync.service", check=False)
+    assert r.returncode == 0, r.stderr
+    assert ssh("systemctl", "show", "-p", "Result", "secrets-sync.service").stdout.strip() == "Result=success"
+    log = ssh("sudo", "journalctl", "-u", "secrets-sync.service", "--no-pager", "-o", "cat").stdout
+    assert "no Proton Pass token" in log
+    ssh("sudo", "test", "!", "-e", "/var/data/secrets/netbird.env")
+
+
+def test_push_token_writes_pat_root_0600(vm):
     wrapper = vm["tmp"] / "bin" / "ssh"
-    wrapper.parent.mkdir()
+    wrapper.parent.mkdir(exist_ok=True)
     wrapper.write_text(
         "#!/bin/sh\n"
         f"exec {shutil.which('ssh')} -i {vm['key']} -p {vm['port']} -o IdentitiesOnly=yes "
         "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes \"$@\"\n"
     )
     wrapper.chmod(0o755)
-    keyfile = vm["tmp"] / "nbkey"
-    keyfile.write_text("00000000-0000-0000-0000-000000000000\n")
+    token = "pst_" + "D" * 64 + "::SMOKEKEY"
+    tokfile = vm["tmp"] / "pat"
+    tokfile.write_text(token + "\n")
+    # The script then starts secrets-sync.service, which cannot download the example repo: only the PAT file is checked.
     subprocess.run(
-        [str(ROOT / "scripts" / "push-secrets.sh"), "smoke@127.0.0.1", str(keyfile)],
+        [str(ROOT / "scripts" / "push-token.sh"), "smoke@127.0.0.1", str(tokfile)],
         env={**os.environ, "PATH": f"{wrapper.parent}:{os.environ['PATH']}"},
-        check=True, timeout=600,
+        capture_output=True, timeout=600,
     )
     ssh = vm["ssh"]
+    assert ssh("sudo", "stat", "-c", "%a %U", "/var/data/secrets/proton-pat").stdout.strip() == "600 root"
+    assert ssh("sudo", "cat", "/var/data/secrets/proton-pat").stdout == f"PROTON_PASS_PERSONAL_ACCESS_TOKEN={token}\n"
+    assert vm["ssh"]("sudo", "journalctl", "-u", "secrets-sync.service", "--no-pager", "-o", "cat").stdout.count(token) == 0
+
+
+def test_secrets_sync_renders_netbird_env_and_restarts_unit(vm, tmp_path):
+    ssh = vm["ssh"]
+    fake = tmp_path / "pass-cli"
+    fake.write_text(FAKE_PASS_CLI)
+    src = tmp_path / "src"
+    shutil.copytree(ROOT / "secrets", src / "secrets")  # the repo's real manifest and template
+    (src / "secrets" / "pass-cli.version").write_text(f"version=9.9.9\nsha256={hashlib.sha256(fake.read_bytes()).hexdigest()}\n")
+    ssh("rm", "-rf", "/tmp/src")
+    ssh("mkdir", "-p", "/tmp/src")
+    scp(vm, str(src / "secrets"), "smoke@127.0.0.1:/tmp/src/")
+    scp(vm, str(fake), "smoke@127.0.0.1:/tmp/pass-cli-9.9.9")
+    ssh("sudo", "install", "-D", "-m", "0755", "/tmp/pass-cli-9.9.9", "/var/data/bin/pass-cli-9.9.9")
+    sync = ("sudo", "SECRETS_SRC_DIR=/tmp/src", "/usr/local/bin/secrets-sync")
+    r = ssh(*sync, check=False)
+    assert r.returncode == 0, r.stderr
     assert ssh("sudo", "stat", "-c", "%a %U", "/var/data/secrets/netbird.env").stdout.strip() == "600 root"
-    assert ssh("sudo", "cat", "/var/data/secrets/netbird.env").stdout == "NB_SETUP_KEY=00000000-0000-0000-0000-000000000000\n"
+    env_file = ssh("sudo", "cat", "/var/data/secrets/netbird.env").stdout
+    assert [l for l in env_file.splitlines() if not l.startswith("#")] == [
+        f"NB_SETUP_KEY={NB_KEY}",
+        "NB_MANAGEMENT_URL=https://netbird.veronoi.cc",
+    ]
     show = ssh("systemctl", "show", "-p", "ConditionResult,ActiveState", "netbird.service").stdout
     assert "ConditionResult=yes" in show and "ActiveState=active" in show, show
     assert "netbird" in ssh("sudo", "podman", "ps", "--format", "{{.Names}}").stdout
+    ssh("sudo", "test", "!", "-e", "/run/secrets-sync")  # tmpfs session removed
+    # second run: nothing is rewritten, netbird is not restarted
+    before = ssh("systemctl", "show", "-p", "ActiveEnterTimestampMonotonic", "netbird.service").stdout
+    ssh(*sync)
+    assert ssh("systemctl", "show", "-p", "ActiveEnterTimestampMonotonic", "netbird.service").stdout == before
