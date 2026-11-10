@@ -231,7 +231,7 @@ def test_init_generates_files(node):
 def test_init_prints_dns_firewall_and_next_steps(node):
     out = node["run"]("u@h", EMAIL).stdout
     for needle in (DOMAIN, "A record", "80", "443", "3478/udp", f"https://{DOMAIN}/setup",
-                   "push-token.sh", "secrets/netbird.env.tpl", "setup_key", "Proton Pass"):
+                   "node-key.sh", "add-node.sh", "sops", "secrets-sync", "setup key"):
         assert needle in out, needle
     secrets = secrets_of(node["data"] / "config.yaml")
     assert not any(s in out for s in secrets)

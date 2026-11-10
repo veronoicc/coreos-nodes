@@ -185,9 +185,15 @@ Firewall: open at the provider: 80/tcp, 443/tcp (HTTP redirect, HTTPS/gRPC/WebSo
 Next steps:
   1. Once DNS resolves and the ports are open, open https://$domain/setup and create the first admin.
   2. In the dashboard create a setup key (Setup Keys -> Create).
-  3. Store the key in Proton Pass: vault named after this node, item "netbird", field "setup_key"
-     (secrets/netbird.env.tpl already sets NB_MANAGEMENT_URL=https://$domain; README section "Secrets").
-  4. Give the node its Proton Pass token once, which also runs secrets-sync and starts the NetBird client:
-       scripts/push-token.sh $host [token-file]
-     (token already pushed: ssh $host sudo systemctl start secrets-sync)
+  3. Get the node's age public key (generated on the node, the private key never leaves it):
+       scripts/node-key.sh $host
+  4. Make it a recipient (creates .sops.yaml; needs your admin age key, README section "Secrets"):
+       scripts/add-node.sh <node> <that key>
+     <node> is the node's short hostname (the first label of its hostname, e.g. ecstasy).
+  5. Create the encrypted env file for the NetBird client (key from step 2, then plain values go in the same file):
+       printf 'NB_SETUP_KEY=<key>\nNB_MANAGEMENT_URL=https://$domain\n' |
+         sops --encrypt --input-type dotenv --output-type dotenv \\
+           --filename-override secrets/<node>/netbird.env.sops /dev/stdin > secrets/<node>/netbird.env.sops
+  6. git add secrets .sops.yaml, commit and push, then render it and start the NetBird client:
+       ssh $host sudo systemctl start secrets-sync
 EOF
