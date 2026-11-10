@@ -1,0 +1,5 @@
+creation_rules:
+  - path_regex: secrets/ecstasy/.*
+    age: >-
+      age16npdq708k84a7rp2u8ewgwmqeaw8hfvza49dxely68swnparleys3nn9eq,
+      age1jrzaf6uzng7claent2asc4p7sglmx7xvkg56nxs69ktvxjlvfqps3mffr6
