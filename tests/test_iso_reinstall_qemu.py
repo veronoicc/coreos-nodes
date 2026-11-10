@@ -27,10 +27,10 @@ def free_port():
 
 
 class Vm:
-    def __init__(self, tmp, key):
+    def __init__(self, tmp, key, size="26G"):
         self.tmp, self.key = tmp, key
         self.disk = tmp / "disk.qcow2"
-        subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", str(self.disk), "26G"], check=True)
+        subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", str(self.disk), size], check=True)
         self.proc = None
 
     def boot(self, iso, user):
@@ -51,6 +51,8 @@ class Vm:
         deadline = time.time() + 900
         while time.time() < deadline:
             assert self.proc.poll() is None, "qemu exited before ssh came up"
+            console = (self.tmp / "console.log").read_text(errors="replace")
+            assert "Ignition has failed" not in console, "Ignition failed on first boot; console tail:\n" + console[-3000:]
             if subprocess.run([*self.base, "true"], capture_output=True).returncode == 0:
                 return
             time.sleep(5)
@@ -110,5 +112,17 @@ def test_reinstall_keeps_data_partition(tmp_path):
         assert vm.ssh("sudo", "blkid", "-s", "UUID", "-o", "value", "/dev/disk/by-partlabel/data").strip() == uuid1
         assert vm.ssh("sudo", "cat", "/var/data/ssh/ssh_host_ed25519_key.pub") == hostkey1
         assert vm.ssh("sh", "-c", "getent passwd first || true").strip() == ""  # OS rebuilt: removed user is gone
+    finally:
+        vm.stop()
+
+
+def test_installs_on_20gib_disk(tmp_path):
+    # Regression: root_size_gib=20 made ignition-disks fail on a 20 GiB disk (sysroot never mounted).
+    key = tmp_path / "id"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+    vm = Vm(tmp_path, key, size="20G")
+    try:
+        vm.boot(make_iso(tmp_path, key, "first", "one"), "first")
+        assert vm.ssh("findmnt", "-no", "FSTYPE", "/var/data").strip() == "xfs"
     finally:
         vm.stop()
