@@ -1,10 +1,12 @@
-"""secrets-sync with a FAKE pass-cli (serves values from a fixture dir), fake systemctl and fake curl.
+"""secrets-sync with the REAL pinned sops and age-keygen; only systemctl and curl are stubbed.
 
-The fake pass-cli is installed as the pinned binary (`<bin dir>/pass-cli-<version>`), exactly where the
-script looks for the real one, so the script's install/verify/login/fetch code runs unmodified.
+The pinned binaries are placed exactly where the script looks for them (`<bin dir>/sops-<version>`,
+`<bin dir>/age-keygen-<version>`), so the script's verify/decrypt/render code runs unmodified. Every sops/age
+call uses a temp HOME and explicit key files, never the developer's own sops/age configuration.
 """
 import hashlib
 import os
+import shutil
 import stat
 import subprocess
 import tarfile
@@ -12,40 +14,14 @@ from pathlib import Path
 
 import pytest
 
-from conftest import ROOT
+from conftest import ROOT, age_url, read_pin, sops_url
 
 SCRIPT = ROOT / "files" / "secrets-sync"
-VERSION = "9.9.9"
-TOKEN = "pst_" + "A" * 64 + "::FAKEKEYFAKEKEYFAKEKEY"
+NODE = "ecstasy"
 SETUP_KEY = "setup-key-VALUE-0001"
 DB_PASS = "db-pass-VALUE-0002"
-ALL_VALUES = (SETUP_KEY, DB_PASS)
-
-FAKE_PASS_CLI = r"""#!/bin/bash
-# fake pass-cli: values come from $FAKE_DIR/values/<vault>/<item>/<field>
-log=$FAKE_DIR/calls.log
-echo "pass-cli $*" >> "$log"
-for f in "$FAKE_WATCH"/.*; do [ -f "$f" ] && echo "mode $(stat -c %a "$f")" >> "$FAKE_DIR/modes.log"; done
-sess=$PROTON_PASS_SESSION_DIR/.session/session.json
-case $1 in
---version) echo "Proton Pass CLI fake" ;;
-login)
-    echo "login-env session=$PROTON_PASS_SESSION_DIR home=$HOME keys=$PROTON_PASS_KEY_PROVIDER" >> "$log"
-    [ ! -e "$FAKE_DIR/fail-login" ] || { echo "Error: network down" >&2; exit 1; }
-    [ "$PROTON_PASS_PERSONAL_ACCESS_TOKEN" = "$(cat "$FAKE_DIR/token")" ] || { echo "Error: invalid personal access token" >&2; exit 1; }
-    mkdir -p "$(dirname "$sess")"
-    : > "$sess"
-    echo "Successfully logged in" ;;
-logout) rm -f "$sess"; echo "Successfully logged out" ;;
-item)
-    [ -f "$sess" ] || { echo "Error: This operation requires an authenticated client" >&2; exit 1; }
-    ref=${3#pass://}
-    [ -f "$FAKE_DIR/values/$ref" ] || { echo "Error: Could not find $ref" >&2; exit 1; }
-    cat "$FAKE_DIR/values/$ref"
-    echo ;;
-*) exit 2 ;;
-esac
-"""
+ALL_VALUES = (SETUP_KEY, DB_PASS, "rotated-VALUE-0003", "other-node-VALUE-0004")
+SECRET_PREFIX = "AGE-SECRET" + "-KEY-"  # not contiguous: the repo scan test must not trip over this file
 
 FAKE_CURL = r"""#!/bin/bash
 echo "curl $*" >> "$FAKE_DIR/curl.log"
@@ -55,37 +31,37 @@ for ((i = 1; i < $#; i++)); do
 done
 url=${*: -1}
 case $url in
-*.tar.gz) cp "$FAKE_DIR/repo.tar.gz" "$out" ;;
-*) cp "$FAKE_DIR/served-binary" "$out" ;;
+*/archive/refs/heads/*.tar.gz) cp "$FAKE_DIR/repo.tar.gz" "$out" ;;
+*getsops/sops*) cp "$FAKE_DIR/served-sops" "$out" ;;
+*FiloSottile/age*) cp "$FAKE_DIR/served-age.tar.gz" "$out" ;;
+*) exit 22 ;;
 esac
 """
 
 
-def sha256(text: str) -> str:
-    return hashlib.sha256(text.encode()).hexdigest()
+def sha256(path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 class Env:
-    def __init__(self, tmp: Path):
+    def __init__(self, tmp: Path, tools):
         self.tmp = tmp
+        self.tools = tools
+        self.pin = dict(tools.pin)
         self.src = tmp / "src"
-        (self.src / "secrets").mkdir(parents=True)
+        self.node_dir = self.src / "secrets" / NODE
+        self.node_dir.mkdir(parents=True)
         self.fake = tmp / "fake"
-        (self.fake / "values").mkdir(parents=True)
+        self.fake.mkdir()
         self.bin = tmp / "bin"
         self.bin.mkdir()
-        self.pc_dir = tmp / "data" / "bin"
+        self.tools_dir = tmp / "data" / "bin"
         self.out = tmp / "data" / "secrets"
         self.out.mkdir(parents=True)
-        self.pat = self.out / "proton-pat"
-        self.session = tmp / "run" / "secrets-sync"
+        self.home = tmp / "home"
+        self.home.mkdir()
         self.hostname = tmp / "hostname"
-        self.hostname.write_text("ecstasy.node.example.org\n")
-        (self.fake / "token").write_text(TOKEN)
-        self.pat.write_text(f"PROTON_PASS_PERSONAL_ACCESS_TOKEN={TOKEN}\n")
-        self.pat.chmod(0o600)
-        (self.fake / "calls.log").write_text("")
-        (self.fake / "modes.log").write_text("")
+        self.hostname.write_text(f"{NODE}.node.example.org\n")
         for tool in ("systemctl",):
             p = self.bin / tool
             p.write_text(f'#!/bin/sh\necho "$*" >> "{self.fake}/systemctl.log"\n')
@@ -94,61 +70,88 @@ class Env:
         self.bin_curl = self.bin / "curl"
         self.bin_curl.write_text(FAKE_CURL)
         self.bin_curl.chmod(0o755)
-        self.install_pass_cli()
-        self.write_pin(VERSION, sha256(FAKE_PASS_CLI))
+        self.write_pin()
+        self.install_tools()
+
+    # ---- keys and encryption
+    @property
+    def key(self):
+        return self.out / "age.key"
+
+    @property
+    def pub(self):
+        return self.out / "age.pub"
+
+    def keygen(self, path: Path) -> str:
+        """Throwaway age key at path; returns its public key."""
+        subprocess.run([self.tools.age_keygen, "-o", path], check=True, capture_output=True)
+        return subprocess.run([self.tools.age_keygen, "-y", path], check=True, capture_output=True, text=True).stdout.strip()
+
+    def node_key(self) -> str:
+        """Create the node's key the way the script would, so its public key is known to the test."""
+        self.node_pub = self.keygen(self.key)
+        self.pub.write_text(self.node_pub + "\n")
+        return self.node_pub
+
+    def encrypt(self, name, text, recipients=None, node=NODE):
+        """SOPS dotenv file secrets/<node>/<name>, encrypted to the node key (default) or the given public keys."""
+        plain = self.tmp / "plain.env"
+        plain.write_text(text)
+        dest = self.src / "secrets" / node / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run(
+            [self.tools.sops, "--encrypt", "--age", ",".join(recipients or [self.node_pub]), "--input-type", "dotenv",
+             "--output-type", "dotenv", "--output", dest, plain],
+            env={**os.environ, "HOME": str(self.home)}, capture_output=True, text=True,
+        )
+        plain.unlink()
+        assert r.returncode == 0, r.stderr
+        return dest
 
     # ---- fixtures
-    def install_pass_cli(self, version=VERSION, text=FAKE_PASS_CLI):
-        self.pc_dir.mkdir(parents=True, exist_ok=True)
-        p = self.pc_dir / f"pass-cli-{version}"
-        p.write_text(text)
-        p.chmod(0o755)
+    def install_tools(self):
+        self.tools_dir.mkdir(parents=True, exist_ok=True)
+        (self.tools_dir / f"sops-{self.pin['sops_version']}").symlink_to(self.tools.sops)
+        (self.tools_dir / f"age-keygen-{self.pin['age_version']}").symlink_to(self.tools.age_keygen)
 
-    def write_pin(self, version, sha):
-        (self.src / "secrets" / "pass-cli.version").write_text(f"version={version}\nsha256={sha}\n")
+    def write_pin(self, **over):
+        self.pin.update(over)
+        lines = [f"{k}={self.pin[k]}" for k in ("sops_version", "sops_sha256", "age_version", "age_archive_sha256", "age_keygen_sha256")]
+        (self.src / "secrets" / "tools.version").write_text("# pin\n" + "\n".join(lines) + "\n")
 
-    def target(self, tpl, dest, mode="0600", owner="-", units="-"):
-        with open(self.src / "secrets" / "targets.conf", "a") as f:
-            f.write(f"{tpl} {dest} {mode} {owner} {units}\n")
+    def serve_real_tools(self):
+        shutil.copy(self.tools.sops, self.fake / "served-sops")
+        shutil.copy(self.tools.age_tar, self.fake / "served-age.tar.gz")
 
-    def template(self, name, text):
-        (self.src / "secrets" / name).write_text(text)
-
-    def value(self, ref, text):
-        p = self.fake / "values" / ref
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text)
+    def target(self, name, dest, mode="0600", owner="-", units="-"):
+        with open(self.node_dir / "targets.conf", "a") as f:
+            f.write(f"{name} {dest} {mode} {owner} {units}\n")
 
     def standard(self):
         """netbird.env (restarts netbird.service) + app.env (0640, restarts app.service and app2.service)."""
-        self.template(
-            "netbird.env.tpl",
-            "# comment line\nNB_SETUP_KEY=pass://{node}/netbird/setup_key\nNB_MANAGEMENT_URL=https://nb.example.org\n",
-        )
-        self.template("app.env.tpl", "DB_PASSWORD=pass://{node}/app/db_password\nMODE=prod\n")
-        self.target("netbird.env.tpl", self.out / "netbird.env", "0600", "-", "netbird.service")
-        self.target("app.env.tpl", self.out / "app.env", "0640", "-", "app.service,app2.service")
-        self.value("ecstasy/netbird/setup_key", SETUP_KEY)
-        self.value("ecstasy/app/db_password", DB_PASS)
+        self.node_key()
+        self.encrypt("netbird.env.sops", f"# comment line\nNB_SETUP_KEY={SETUP_KEY}\nNB_MANAGEMENT_URL=https://nb.example.org/a?b=c=d\n")
+        self.encrypt("app.env.sops", f"DB_PASSWORD={DB_PASS}\nMODE=prod\n")
+        self.target("netbird.env.sops", self.out / "netbird.env", "0600", "-", "netbird.service")
+        self.target("app.env.sops", self.out / "app.env", "0640", "-", "app.service,app2.service")
 
     # ---- running
     def run(self, extra_env=None, check=True, use_src=True):
         env = {
             **os.environ,
             "PATH": f"{self.bin}:{os.environ['PATH']}",
-            "SECRETS_PAT_FILE": str(self.pat),
-            "SECRETS_BIN_DIR": str(self.pc_dir),
-            "SECRETS_SESSION_DIR": str(self.session),
+            "HOME": str(self.home),
+            "SECRETS_KEY_DIR": str(self.out),
+            "SECRETS_BIN_DIR": str(self.tools_dir),
             "SECRETS_LOCK": str(self.tmp / "lock"),
             "SECRETS_HOSTNAME_FILE": str(self.hostname),
             "FAKE_DIR": str(self.fake),
-            "FAKE_WATCH": str(self.out),
         }
         if use_src:
             env["SECRETS_SRC_DIR"] = str(self.src)
         env.update(extra_env or {})
         self.systemctl_log.write_text("")
-        r = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=60)
+        r = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=120)
         if check:
             assert r.returncode == 0, r.stdout + r.stderr
         return r
@@ -163,64 +166,60 @@ class Env:
     def restarted(self):
         return {c.split()[-1] for c in self.systemctl() if c.startswith("restart")}
 
-    def calls(self):
-        return (self.fake / "calls.log").read_text().splitlines()
+    def curl_calls(self):
+        p = self.fake / "curl.log"
+        return p.read_text().splitlines() if p.exists() else []
 
     def read(self, name):
         return (self.out / name).read_text()
 
 
 @pytest.fixture
-def env(tmp_path):
-    e = Env(tmp_path)
+def env(tmp_path, real_tools):
+    e = Env(tmp_path, real_tools)
     e.standard()
     return e
 
 
-def assert_no_secrets(r):
+def assert_no_secrets(e, r):
     blob = r.stdout + r.stderr
-    for s in (*ALL_VALUES, TOKEN, TOKEN.split("::")[1], "A" * 64):
+    for s in (*ALL_VALUES, SECRET_PREFIX):
         assert s not in blob
+    for line in e.key.read_text().splitlines() if e.key.exists() else []:
+        if line.startswith(SECRET_PREFIX):
+            assert line not in blob
 
 
 def snapshot(env):
-    return {p.name: (p.read_bytes(), p.stat().st_ino) for p in env.out.iterdir() if p.name != "proton-pat"}
+    return {p.name: (p.read_bytes(), p.stat().st_ino, p.stat().st_mtime_ns) for p in env.out.iterdir() if not p.name.startswith("age.")}
 
 
 # ------------------------------------------------------------------ rendering
 
 
 def test_first_sync_renders_files_and_restarts_dependents(env):
-    env.run()
-    assert env.read("netbird.env") == f"# comment line\nNB_SETUP_KEY={SETUP_KEY}\nNB_MANAGEMENT_URL=https://nb.example.org\n"
+    r = env.run()
+    assert env.read("netbird.env") == f"# comment line\nNB_SETUP_KEY={SETUP_KEY}\nNB_MANAGEMENT_URL=https://nb.example.org/a?b=c=d\n"
     assert env.read("app.env") == f"DB_PASSWORD={DB_PASS}\nMODE=prod\n"
     assert stat.S_IMODE((env.out / "netbird.env").stat().st_mode) == 0o600
     assert stat.S_IMODE((env.out / "app.env").stat().st_mode) == 0o640
     assert env.restarted() == {"netbird.service", "app.service", "app2.service"}
+    assert_no_secrets(env, r)
 
 
 def test_owner_is_applied(env):
     me = f"{os.getuid()}:{os.getgid()}"
-    env.target("app.env.tpl", env.out / "owned.env", "0600", me, "-")
+    env.target("app.env.sops", env.out / "owned.env", "0600", me, "-")
     env.run()
     st = (env.out / "owned.env").stat()
     assert (st.st_uid, st.st_gid) == (os.getuid(), os.getgid())
 
 
-def test_literal_lines_pass_through_without_pass_cli(env):
-    env.template("lit.tpl", "A=1\n# note\n\nURL=https://x.example/a?b=c=d\n")
-    env.target("lit.tpl", env.out / "lit.env")
-    env.run()
-    assert env.read("lit.env") == "A=1\n# note\n\nURL=https://x.example/a?b=c=d\n"
-
-
-def test_node_placeholder_is_short_hostname(env):
+def test_node_folder_is_the_short_hostname(env):
     env.hostname.write_text("other.node.example.org\n")
-    env.value("other/netbird/setup_key", "other-key")
-    env.value("other/app/db_password", "other-db")
-    env.run()
-    assert "NB_SETUP_KEY=other-key" in env.read("netbird.env")
-    assert "pass://other/netbird/setup_key" in "\n".join(env.calls())
+    r = env.run(check=False)  # secrets/other/ does not exist: nothing to do, ecstasy's folder is not touched
+    assert r.returncode == 0
+    assert not (env.out / "netbird.env").exists() and env.systemctl() == []
 
 
 def test_invalid_node_name_rejected(env):
@@ -230,25 +229,29 @@ def test_invalid_node_name_rejected(env):
     assert not (env.out / "netbird.env").exists()
 
 
-def test_value_with_pass_ref_not_at_start_rejected(env):
-    env.template("bad.tpl", "K= pass://{node}/netbird/setup_key\n")
-    env.target("bad.tpl", env.out / "bad.env")
-    r = env.run(check=False)
-    assert r.returncode != 0 and "K" in r.stderr
-    assert not (env.out / "bad.env").exists() and not (env.out / "netbird.env").exists()
+def test_node_reads_only_its_own_folder_and_ignores_other_nodes(env, tmp_path):
+    other_key = env.keygen(tmp_path / "other.key")
+    env.encrypt("netbird.env.sops", "NB_SETUP_KEY=other-node-VALUE-0004\n", [other_key], node="other")
+    (env.src / "secrets" / "other" / "targets.conf").write_text(f"netbird.env.sops {env.out}/from-other.env 0600 - other.service\n")
+    (env.src / "secrets" / "other" / "broken.env.sops").write_text("garbage that is not even sops\n")
+    r = env.run()
+    assert not (env.out / "from-other.env").exists()
+    assert "other.service" not in " ".join(env.systemctl())
+    assert_no_secrets(env, r)
 
 
 def test_dash_means_no_restart(env):
-    env.target("lit.tpl", env.out / "lit.env")
-    env.template("lit.tpl", "A=1\n")
+    env.encrypt("lit.env.sops", "A=1\n")
+    env.target("lit.env.sops", env.out / "lit.env")
     env.run()
+    assert (env.out / "lit.env").read_text() == "A=1\n"
     assert "lit" not in " ".join(env.systemctl())
 
 
 def test_each_unit_restarted_once(env):
-    env.target("netbird.env.tpl", env.out / "nb2.env", "0600", "-", "netbird.service")
+    env.target("netbird.env.sops", env.out / "nb2.env", "0600", "-", "netbird.service")
     env.run()
-    restarts = [c for c in env.systemctl() if c.startswith("restart")]
+    restarts = [c.split()[-1] for c in env.systemctl() if c.startswith("restart")]
     assert len(restarts) == len(set(restarts)) == 3
 
 
@@ -258,26 +261,32 @@ def test_each_unit_restarted_once(env):
 def test_identical_second_sync_does_nothing(env):
     env.run()
     before = snapshot(env)
-    mtimes = {p.name: p.stat().st_mtime_ns for p in env.out.iterdir()}
     env.run()
+    assert snapshot(env) == before  # content, inode and mtime: not rewritten
     assert env.systemctl() == []
-    assert snapshot(env) == before
-    assert {p.name: p.stat().st_mtime_ns for p in env.out.iterdir()} == mtimes
-    assert sorted(p.name for p in env.out.iterdir()) == ["app.env", "netbird.env", "proton-pat"]  # no temp files
+    assert sorted(p.name for p in env.out.iterdir()) == ["age.key", "age.pub", "app.env", "netbird.env"]  # no temp files
+
+
+def test_reencrypting_same_values_does_not_restart(env):
+    env.run()
+    env.encrypt("netbird.env.sops", f"# comment line\nNB_SETUP_KEY={SETUP_KEY}\nNB_MANAGEMENT_URL=https://nb.example.org/a?b=c=d\n")
+    env.run()
+    assert env.systemctl() == []  # ciphertext differs (new IVs), plaintext does not
 
 
 def test_changed_secret_restarts_only_its_units(env):
     env.run()
-    env.value("ecstasy/app/db_password", "rotated-db")
+    before = snapshot(env)
+    env.encrypt("app.env.sops", "DB_PASSWORD=rotated-VALUE-0003\nMODE=prod\n")
     env.run()
     assert env.restarted() == {"app.service", "app2.service"}
-    assert env.read("app.env") == "DB_PASSWORD=rotated-db\nMODE=prod\n"
-    assert SETUP_KEY in env.read("netbird.env")
+    assert "rotated-VALUE-0003" in env.read("app.env")
+    assert snapshot(env)["netbird.env"] == before["netbird.env"]
 
 
-def test_changed_literal_in_template_restarts_that_target(env):
+def test_changed_plain_value_in_same_file_restarts_that_target(env):
     env.run()
-    env.template("netbird.env.tpl", "NB_SETUP_KEY=pass://{node}/netbird/setup_key\nNB_MANAGEMENT_URL=https://new.example.org\n")
+    env.encrypt("netbird.env.sops", f"NB_SETUP_KEY={SETUP_KEY}\nNB_MANAGEMENT_URL=https://other.example.org\n")
     env.run()
     assert env.restarted() == {"netbird.service"}
 
@@ -285,137 +294,159 @@ def test_changed_literal_in_template_restarts_that_target(env):
 # ------------------------------------------------------------------ failure handling
 
 
-def test_login_failure_keeps_files_and_restarts_nothing(env):
+def test_file_encrypted_to_another_nodes_key_fails_and_keeps_everything(env, tmp_path):
     env.run()
     before = snapshot(env)
-    env.value("ecstasy/app/db_password", "rotated-db")
-    (env.fake / "fail-login").write_text("")
+    other = env.keygen(tmp_path / "other.key")
+    env.encrypt("netbird.env.sops", "NB_SETUP_KEY=other-node-VALUE-0004\n", [other])  # would change netbird.env
+    env.encrypt("app.env.sops", "DB_PASSWORD=rotated-VALUE-0003\nMODE=prod\n")  # valid change, must NOT be applied either
     r = env.run(check=False)
     assert r.returncode != 0
     assert snapshot(env) == before
     assert env.systemctl() == []
-    assert_no_secrets(r)
-    assert "rotated-db" not in r.stdout + r.stderr
+    assert "netbird.env.sops" in r.stderr  # says which file, not what is in it
+    assert_no_secrets(env, r)
 
 
-def test_wrong_token_fails_without_leaking_it(env):
-    (env.fake / "token").write_text("pst_" + "B" * 64 + "::OTHER")
-    r = env.run(check=False)
-    assert r.returncode != 0
-    assert not (env.out / "netbird.env").exists()
-    assert_no_secrets(r)
+def test_admin_key_in_environment_cannot_replace_the_node_key(env, tmp_path):
+    admin = tmp_path / "admin.key"
+    admin_pub = env.keygen(admin)
+    env.encrypt("netbird.env.sops", "NB_SETUP_KEY=other-node-VALUE-0004\n", [admin_pub])
+    default = env.home / ".config" / "sops" / "age"
+    default.mkdir(parents=True)
+    shutil.copy(admin, default / "keys.txt")
+    r = env.run(extra_env={"SOPS_AGE_KEY": admin.read_text().splitlines()[-1], "SOPS_AGE_KEY_FILE": str(admin)}, check=False)
+    assert r.returncode != 0 and not (env.out / "netbird.env").exists()
 
 
-def test_fetch_failure_keeps_all_files_even_for_targets_that_would_change(env):
+def test_tampered_ciphertext_fails_and_keeps_everything(env):
     env.run()
     before = snapshot(env)
-    env.value("ecstasy/netbird/setup_key", "rotated-key")  # first target would change...
-    (env.fake / "values" / "ecstasy" / "app" / "db_password").unlink()  # ...second target cannot be fetched
+    f = env.node_dir / "app.env.sops"
+    text = f.read_text()
+    assert "MODE=ENC[AES256_GCM,data:" in text
+    f.write_text(text.replace("MODE=ENC[AES256_GCM,data:", "MODE=ENC[AES256_GCM,data:AAAA", 1))
+    env.encrypt("netbird.env.sops", "NB_SETUP_KEY=rotated-VALUE-0003\n")
     r = env.run(check=False)
     assert r.returncode != 0
-    assert snapshot(env) == before
-    assert sorted(p.name for p in env.out.iterdir()) == ["app.env", "netbird.env", "proton-pat"]
-    assert env.systemctl() == []
-    assert "rotated-key" not in r.stdout + r.stderr
-    assert_no_secrets(r)
-    assert "db_password" in r.stderr  # says which reference failed, not its value
+    assert snapshot(env) == before and env.systemctl() == []
+    assert_no_secrets(env, r)
+
+
+def test_tampered_mac_fails(env):
+    f = env.node_dir / "app.env.sops"
+    lines = f.read_text().splitlines()
+    f.write_text("\n".join(l if not l.startswith("DB_PASSWORD=") else l.replace("tag:", "tag:A", 1) for l in lines) + "\n")
+    r = env.run(check=False)
+    assert r.returncode != 0 and not (env.out / "app.env").exists()
+    assert_no_secrets(env, r)
+
+
+def test_not_a_sops_file_fails(env):
+    (env.node_dir / "app.env.sops").write_text("DB_PASSWORD=plain-text-oops\n")
+    r = env.run(check=False)
+    assert r.returncode != 0 and not (env.out / "app.env").exists() and not (env.out / "netbird.env").exists()
 
 
 def test_empty_value_is_a_failure(env):
-    env.value("ecstasy/netbird/setup_key", "")
+    env.encrypt("netbird.env.sops", "NB_SETUP_KEY=\nNB_MANAGEMENT_URL=https://nb.example.org\n")
     r = env.run(check=False)
     assert r.returncode != 0
-    assert not (env.out / "netbird.env").exists()
+    assert "NB_SETUP_KEY" in r.stderr  # the key name, never a value
+    assert not (env.out / "netbird.env").exists() and env.systemctl() == []
 
 
-def test_multiline_value_is_a_failure(env):
-    env.value("ecstasy/netbird/setup_key", "line1\nline2")
+def test_decrypted_file_without_assignments_is_a_failure(env):
+    env.encrypt("netbird.env.sops", "# nothing but a comment\n")
     r = env.run(check=False)
-    assert r.returncode != 0
-    assert not (env.out / "netbird.env").exists()
-    assert "line1" not in r.stdout + r.stderr
+    assert r.returncode != 0 and not (env.out / "netbird.env").exists()
 
 
 def test_failed_restart_exits_nonzero_but_files_are_kept(env):
     (env.bin / "systemctl").write_text('#!/bin/sh\n[ "$2" = netbird.service ] && exit 1\nexit 0\n')
     r = env.run(check=False)
-    assert r.returncode != 0 and "netbird.service" in r.stderr
+    assert r.returncode != 0
     assert env.read("netbird.env").startswith("# comment")
 
 
-# ------------------------------------------------------------------ PAT file
-
-
-def test_missing_pat_file_exits_zero_with_one_line(env):
-    env.pat.unlink()
-    r = env.run()
-    assert len([l for l in (r.stdout + r.stderr).splitlines() if l.strip()]) == 1
-    assert "proton-pat" in r.stdout + r.stderr
-    assert env.calls() == [] and env.systemctl() == []
-    assert not (env.fake / "curl.log").exists()
-
-
-def test_missing_pat_file_does_not_need_repo(env):
-    env.pat.unlink()
-    r = env.run(use_src=False, extra_env={"APPS_REPO_URL": ""})
-    assert r.returncode == 0
-
-
-def test_bare_token_file_is_accepted(env):
-    env.pat.write_text(TOKEN + "\n")
-    env.run()
-    assert (env.out / "netbird.env").exists()
-
-
-@pytest.mark.parametrize("bad", ["", "\n", "garbage\n", "PROTON_PASS_PERSONAL_ACCESS_TOKEN=\n", f"{TOKEN}\n{TOKEN}\n", f"x=1\n{TOKEN}\n"])
-def test_malformed_pat_file_fails_without_leaking(env, bad):
-    env.pat.write_text(bad)
-    r = env.run(check=False)
-    assert r.returncode != 0
-    assert env.calls() == []
-    assert "A" * 64 not in r.stdout + r.stderr
-
-
-def test_token_never_on_command_line_only_in_env(env):
-    env.run()
-    assert TOKEN not in (env.fake / "calls.log").read_text()
-    assert "login" in " ".join(env.calls())
-
-
-# ------------------------------------------------------------------ session on tmpfs, cleanup
-
-
-def test_session_dir_is_redirected_and_removed(env):
-    env.run()
-    login_env = next(c for c in env.calls() if c.startswith("login-env"))
-    assert f"session={env.session}/" in login_env
-    assert f"home={env.session}" in login_env
-    assert "keys=fs" in login_env
-    assert "pass-cli logout" in env.calls()
-    assert not env.session.exists()
-
-
-def test_session_removed_and_logged_out_after_failure(env):
-    (env.fake / "values" / "ecstasy" / "app" / "db_password").unlink()
+def test_no_temp_files_left_after_failure(env):
+    env.encrypt("app.env.sops", "DB_PASSWORD=\n")
     env.run(check=False)
-    assert "pass-cli logout" in env.calls()
-    assert not env.session.exists()
+    assert sorted(p.name for p in env.out.iterdir()) == ["age.key", "age.pub"]
 
 
-def test_temp_files_are_never_group_or_world_accessible(env):
+# ------------------------------------------------------------------ node key
+
+
+def test_missing_key_is_generated_with_right_modes_and_logged(tmp_path, real_tools):
+    e = Env(tmp_path, real_tools)  # no manifest at all
+    r = e.run()
+    assert stat.S_IMODE(e.key.stat().st_mode) == 0o600 and e.key.stat().st_uid == os.getuid()
+    assert stat.S_IMODE(e.pub.stat().st_mode) == 0o644
+    derived = subprocess.run([real_tools.age_keygen, "-y", e.key], capture_output=True, text=True, check=True).stdout.strip()
+    pub = e.pub.read_text()
+    assert pub == derived + "\n" and pub.startswith("age1")
+    assert derived in r.stdout + r.stderr  # the public key goes to the journal
+    assert SECRET_PREFIX not in r.stdout + r.stderr
+
+
+def test_existing_key_is_kept_and_pub_is_restored(env):
+    key_before, ino = env.key.read_bytes(), env.key.stat().st_ino
+    env.pub.unlink()
     env.run()
-    modes = (env.fake / "modes.log").read_text().split()
-    seen = [m for m in modes if m != "mode"]
-    assert seen, "fake pass-cli never saw a temp file in the destination dir"
-    assert all(int(m, 8) & 0o077 == 0 for m in seen), seen
+    assert env.key.read_bytes() == key_before and env.key.stat().st_ino == ino
+    assert env.pub.read_text().strip() == env.node_pub
+    assert stat.S_IMODE(env.pub.stat().st_mode) == 0o644
 
 
-def test_stale_session_dir_is_replaced(env):
-    (env.session / ".session").mkdir(parents=True)
-    (env.session / ".session" / "session.json").write_text("")  # would let a fake logged-out client "work"
-    (env.fake / "fail-login").write_text("")
+def test_garbage_key_file_fails_loudly(env):
+    env.key.write_text("not an age key\n")
     r = env.run(check=False)
-    assert r.returncode != 0 and not (env.out / "netbird.env").exists()
+    assert r.returncode != 0 and "age.key" in r.stderr
+    assert not (env.out / "netbird.env").exists()
+
+
+def test_key_material_is_never_printed(env):
+    r = env.run()
+    secret = [l for l in env.key.read_text().splitlines() if l.startswith(SECRET_PREFIX)][0]
+    assert secret not in r.stdout + r.stderr
+    r = env.run()
+    assert secret not in r.stdout + r.stderr
+
+
+# ------------------------------------------------------------------ nothing to do
+
+
+def test_no_manifest_exits_zero_with_one_line(env):
+    shutil.rmtree(env.src / "secrets" / NODE)
+    r = env.run()
+    lines = (r.stdout + r.stderr).splitlines()
+    assert len(lines) == 1 and "nothing to do" in lines[0]
+    assert env.systemctl() == []
+
+
+def test_manifest_without_encrypted_files_exits_zero_with_one_line(env):
+    (env.node_dir / "netbird.env.sops").unlink()
+    (env.node_dir / "app.env.sops").unlink()
+    r = env.run()
+    lines = (r.stdout + r.stderr).splitlines()
+    assert len(lines) == 1 and "nothing to do" in lines[0]
+    assert not (env.out / "netbird.env").exists() and env.systemctl() == []
+
+
+def test_shipped_manifest_alone_is_a_clean_noop(tmp_path, real_tools):
+    e = Env(tmp_path, real_tools)
+    shutil.copy(ROOT / "secrets" / NODE / "targets.conf", e.node_dir / "targets.conf")
+    r = e.run()
+    assert len((r.stdout + r.stderr).splitlines()) <= 2  # at most: new key logged, nothing to do
+    assert e.key.exists() and e.systemctl() == []
+
+
+def test_only_some_encrypted_files_present_is_a_failure(env):
+    (env.node_dir / "app.env.sops").unlink()
+    r = env.run(check=False)
+    assert r.returncode != 0 and "app.env.sops" in r.stderr
+    assert not (env.out / "netbird.env").exists()
 
 
 # ------------------------------------------------------------------ manifest validation
@@ -424,146 +455,186 @@ def test_stale_session_dir_is_replaced(env):
 @pytest.mark.parametrize(
     "line",
     [
-        "../x.tpl /tmp/x 0600 - -",
-        "sub/x.tpl /tmp/x 0600 - -",
-        "netbird.env.tpl relative/path 0600 - -",
-        "netbird.env.tpl /tmp/x 99999 - -",
-        "netbird.env.tpl /tmp/x 0600 bad owner -",
-        "netbird.env.tpl /tmp/x 0600 - a;b",
-        "netbird.env.tpl /tmp/x 0600 -",
+        "../x.sops /tmp/x 0600 - -",
+        "sub/x.sops /tmp/x 0600 - -",
+        "netbird.env.sops relative/path 0600 - -",
+        "netbird.env.sops /tmp/x 99999 - -",
+        "netbird.env.sops /tmp/x 0600 bad owner -",
+        "netbird.env.sops /tmp/x 0600 - a;b",
+        "netbird.env.sops /tmp/x 0600 -",
     ],
 )
-def test_bad_manifest_line_rejected_before_any_login(env, line):
-    (env.src / "secrets" / "targets.conf").write_text(line + "\n")
+def test_bad_manifest_line_rejected_before_anything_is_decrypted(env, line):
+    (env.node_dir / "targets.conf").write_text(line + "\n")
     r = env.run(check=False)
     assert r.returncode != 0
-    assert env.calls() == []
+    assert not (env.out / "netbird.env").exists() and env.systemctl() == []
 
 
 def test_manifest_comments_and_blank_lines_ignored(env):
-    conf = env.src / "secrets" / "targets.conf"
+    conf = env.node_dir / "targets.conf"
     conf.write_text("# header\n\n" + conf.read_text())
     env.run()
-
-
-def test_missing_template_is_a_failure_and_changes_nothing(env):
-    env.target("nope.tpl", env.out / "nope.env")
-    r = env.run(check=False)
-    assert r.returncode != 0 and "nope.tpl" in r.stderr
-    assert not (env.out / "netbird.env").exists()
+    assert (env.out / "netbird.env").exists()
 
 
 def test_source_without_secrets_dir_fails(env):
-    for p in (env.src / "secrets").iterdir():
-        p.unlink()
-    (env.src / "secrets").rmdir()
+    shutil.rmtree(env.src / "secrets")
     r = env.run(check=False)
     assert r.returncode != 0 and "secrets" in r.stderr
 
 
-# ------------------------------------------------------------------ pass-cli pin / download
+# ------------------------------------------------------------------ tool pin / download
 
 
-def served(env, text):
-    (env.fake / "served-binary").write_text(text)
-
-
-def test_pin_without_installed_binary_downloads_verifies_and_installs(env):
-    (env.pc_dir / f"pass-cli-{VERSION}").unlink()
-    served(env, FAKE_PASS_CLI)
+def test_missing_tools_are_downloaded_verified_and_installed(env):
+    shutil.rmtree(env.tools_dir)
+    env.serve_real_tools()
     env.run()
-    curl = (env.fake / "curl.log").read_text().splitlines()
-    assert len(curl) == 1
-    assert curl[0].endswith(f"https://github.com/protonpass/pass-cli/releases/download/{VERSION}/pass-cli-linux-x86_64")
-    b = env.pc_dir / f"pass-cli-{VERSION}"
-    assert b.read_text() == FAKE_PASS_CLI and stat.S_IMODE(b.stat().st_mode) == 0o755
+    curl = env.curl_calls()
+    assert len(curl) == 2
+    assert sorted(c.split()[-1] for c in curl) == sorted([sops_url(env.pin), age_url(env.pin)])
+    for name, sha in ((f"sops-{env.pin['sops_version']}", env.pin["sops_sha256"]), (f"age-keygen-{env.pin['age_version']}", env.pin["age_keygen_sha256"])):
+        b = env.tools_dir / name
+        assert sha256(b) == sha and stat.S_IMODE(b.stat().st_mode) == 0o755
     assert (env.out / "netbird.env").exists()
-    env.run()  # pinned version is present: no second download
-    assert len((env.fake / "curl.log").read_text().splitlines()) == 1
+    env.run()  # pinned versions are present: no further download
+    assert len(env.curl_calls()) == 2
 
 
-def test_version_bump_redownloads_and_removes_old_binary(env):
-    new = FAKE_PASS_CLI + "# v2\n"
-    served(env, new)
-    env.write_pin("9.9.10", sha256(new))
+def test_nothing_to_render_does_not_download_sops(env):
+    shutil.rmtree(env.tools_dir)
+    shutil.rmtree(env.node_dir)
+    env.serve_real_tools()
     env.run()
-    assert (env.pc_dir / "pass-cli-9.9.10").read_text() == new
-    assert "9.9.10/pass-cli-linux-x86_64" in (env.fake / "curl.log").read_text()
-    assert not (env.pc_dir / f"pass-cli-{VERSION}").exists()
+    curl = env.curl_calls()
+    assert len(curl) == 1 and curl[0].endswith(age_url(env.pin))  # age-keygen is needed for the node key, sops is not
 
 
-def test_bad_checksum_download_is_rejected(env):
-    (env.pc_dir / f"pass-cli-{VERSION}").unlink()
-    served(env, "#!/bin/sh\necho evil\n")
+def test_version_bump_redownloads_and_removes_old_binaries(env):
+    env.serve_real_tools()
+    env.write_pin(sops_version="9.9.9", age_version="8.8.8")  # same bytes, new pin names
+    env.run()
+    assert (env.tools_dir / "sops-9.9.9").exists() and (env.tools_dir / "age-keygen-8.8.8").exists()
+    assert "v9.9.9/sops-v9.9.9.linux.amd64" in "\n".join(env.curl_calls())
+    assert not (env.tools_dir / f"sops-{env.tools.pin['sops_version']}").exists()
+    assert not (env.tools_dir / f"age-keygen-{env.tools.pin['age_version']}").exists()
+
+
+def test_wrong_sops_checksum_is_refused(env):
+    shutil.rmtree(env.tools_dir)
+    env.serve_real_tools()
+    (env.fake / "served-sops").write_text("#!/bin/sh\necho evil\n")
     r = env.run(check=False)
     assert r.returncode != 0 and "checksum" in r.stderr
-    assert not (env.pc_dir / f"pass-cli-{VERSION}").exists()
-    assert not list(env.pc_dir.iterdir())
-    assert env.calls() == [] and not (env.out / "netbird.env").exists()
+    assert not (env.tools_dir / f"sops-{env.pin['sops_version']}").exists()
+    assert not (env.out / "netbird.env").exists() and env.systemctl() == []
 
 
-def test_tampered_installed_binary_is_redownloaded(env):
-    env.install_pass_cli(text="#!/bin/sh\necho evil\n")
-    served(env, FAKE_PASS_CLI)
+def test_wrong_age_archive_checksum_is_refused(env):
+    shutil.rmtree(env.tools_dir)
+    env.serve_real_tools()
+    (env.fake / "served-age.tar.gz").write_bytes(b"not the pinned archive")
+    r = env.run(check=False)
+    assert r.returncode != 0 and "checksum" in r.stderr
+    assert not (env.tools_dir / f"age-keygen-{env.pin['age_version']}").exists()
+
+
+def test_wrong_age_keygen_checksum_is_refused(env):
+    shutil.rmtree(env.tools_dir)
+    env.serve_real_tools()
+    env.write_pin(age_keygen_sha256="0" * 64)
+    r = env.run(check=False)
+    assert r.returncode != 0 and "checksum" in r.stderr
+    assert not (env.tools_dir / f"age-keygen-{env.pin['age_version']}").exists()
+
+
+def test_tampered_installed_sops_is_redownloaded(env):
+    p = env.tools_dir / f"sops-{env.pin['sops_version']}"
+    p.unlink()
+    p.write_text("#!/bin/sh\necho evil\n")
+    p.chmod(0o755)
+    env.serve_real_tools()
     env.run()
-    assert (env.pc_dir / f"pass-cli-{VERSION}").read_text() == FAKE_PASS_CLI
+    assert sha256(p) == env.pin["sops_sha256"]
+    assert any(c.endswith(sops_url(env.pin)) for c in env.curl_calls())
+
+
+def test_tampered_installed_age_keygen_is_redownloaded(env):
+    p = env.tools_dir / f"age-keygen-{env.pin['age_version']}"
+    p.unlink()
+    p.write_text("#!/bin/sh\necho evil\n")
+    p.chmod(0o755)
+    env.serve_real_tools()
+    env.run()
+    assert sha256(p) == env.pin["age_keygen_sha256"]
 
 
 def test_download_failure_with_new_pin_keeps_files(env):
     env.run()
     before = snapshot(env)
-    env.write_pin("9.9.10", sha256("whatever"))
-    (env.bin_curl).write_text("#!/bin/sh\nexit 22\n")
+    env.write_pin(sops_version="9.9.9")
+    env.bin_curl.write_text("#!/bin/sh\nexit 22\n")
+    env.encrypt("app.env.sops", "DB_PASSWORD=rotated-VALUE-0003\nMODE=prod\n")
     r = env.run(check=False)
     assert r.returncode != 0
     assert snapshot(env) == before and env.systemctl() == []
 
 
-@pytest.mark.parametrize("pin", ["", "version=1.2.3\n", "sha256=" + "a" * 64 + "\n", "version=1.2.3\nsha256=xyz\n", "version=../x\nsha256=" + "a" * 64 + "\n"])
-def test_bad_pin_file_rejected(env, pin):
-    (env.src / "secrets" / "pass-cli.version").write_text(pin)
+@pytest.mark.parametrize(
+    "drop",
+    ["sops_version", "sops_sha256", "age_version", "age_archive_sha256", "age_keygen_sha256"],
+)
+def test_pin_file_with_a_missing_key_is_rejected(env, drop):
+    pin = env.src / "secrets" / "tools.version"
+    pin.write_text("".join(l + "\n" for l in pin.read_text().splitlines() if not l.startswith(drop + "=")))
     r = env.run(check=False)
-    assert r.returncode != 0 and "pass-cli.version" in r.stderr
-    assert env.calls() == []
+    assert r.returncode != 0 and "tools.version" in r.stderr
+    assert not (env.out / "netbird.env").exists()
+
+
+@pytest.mark.parametrize("over", [{"sops_sha256": "xyz"}, {"age_keygen_sha256": "A" * 64}, {"sops_version": "../x"}, {"age_version": "1.2"}])
+def test_pin_file_with_malformed_values_is_rejected(env, over):
+    env.write_pin(**over)
+    r = env.run(check=False)
+    assert r.returncode != 0 and "tools.version" in r.stderr
+    assert not (env.out / "netbird.env").exists()
+
+
+def test_missing_pin_file_is_rejected(env):
+    (env.src / "secrets" / "tools.version").unlink()
+    r = env.run(check=False)
+    assert r.returncode != 0 and "tools.version" in r.stderr
 
 
 # ------------------------------------------------------------------ repo download (shared with apps-sync conventions)
 
 
 def test_repo_tarball_download_uses_apps_sync_settings(env):
-    tar = env.fake / "repo.tar.gz"
-    with tarfile.open(tar, "w:gz") as t:
+    with tarfile.open(env.fake / "repo.tar.gz", "w:gz") as t:
         t.add(env.src / "secrets", arcname="repo-main/secrets")
-    env.run(
-        use_src=False,
-        extra_env={"APPS_REPO_URL": "https://github.com/o/r/", "APPS_BRANCH": "feat"},
-    )
-    curl = (env.fake / "curl.log").read_text().splitlines()
-    assert curl[0].endswith("https://github.com/o/r/archive/refs/heads/feat.tar.gz")
+    env.run(use_src=False, extra_env={"APPS_REPO_URL": "https://github.com/o/r/", "APPS_BRANCH": "feat"})
+    assert env.curl_calls()[0].endswith("https://github.com/o/r/archive/refs/heads/feat.tar.gz")
     assert (env.out / "netbird.env").exists()
 
 
-def test_repo_url_required_when_token_present(env):
+def test_repo_url_required(env):
     r = env.run(use_src=False, extra_env={"APPS_REPO_URL": ""}, check=False)
     assert r.returncode != 0 and "APPS_REPO_URL" in r.stderr
 
 
-# ------------------------------------------------------------------ the repo's own manifest
+# ------------------------------------------------------------------ the repo's own files
 
 
-def test_repo_manifest_and_pin_are_wellformed_and_secret_free():
-    conf = [l.split() for l in (ROOT / "secrets" / "targets.conf").read_text().splitlines() if l.strip() and not l.startswith("#")]
-    nb = next(c for c in conf if c[0] == "netbird.env.tpl")
-    assert nb == ["netbird.env.tpl", "/var/data/secrets/netbird.env", "0600", "root:root", "netbird.service"]
-    tpl = (ROOT / "secrets" / "netbird.env.tpl").read_text().splitlines()
-    assert "NB_SETUP_KEY=pass://{node}/netbird/setup_key" in tpl
-    assert "NB_MANAGEMENT_URL=https://netbird.veronoi.cc" in tpl
-    for f in (ROOT / "secrets").glob("*.tpl"):
-        for line in f.read_text().splitlines():
-            if line.strip() and not line.startswith("#"):
-                key, _, val = line.partition("=")
-                assert val.startswith(("pass://", "https://")), f"{f.name}: {key} must be a pass:// ref or a plain URL"
-    pin = dict(l.split("=", 1) for l in (ROOT / "secrets" / "pass-cli.version").read_text().split())
-    assert set(pin) == {"version", "sha256"}
-    assert len(pin["sha256"]) == 64 and int(pin["sha256"], 16) >= 0
-    assert pin["version"].count(".") == 2
+def test_repo_pin_is_wellformed():
+    pin = read_pin()
+    assert set(pin) == {"sops_version", "sops_sha256", "age_version", "age_archive_sha256", "age_keygen_sha256"}
+    for k in ("sops_version", "age_version"):
+        assert len(pin[k].split(".")) == 3
+    for k in ("sops_sha256", "age_archive_sha256", "age_keygen_sha256"):
+        assert len(pin[k]) == 64 and int(pin[k], 16) >= 0
+
+
+def test_repo_manifest_for_ecstasy():
+    conf = [l.split() for l in (ROOT / "secrets" / NODE / "targets.conf").read_text().splitlines() if l.strip() and not l.startswith("#")]
+    assert conf == [["netbird.env.sops", "/var/data/secrets/netbird.env", "0600", "root:root", "netbird.service"]]

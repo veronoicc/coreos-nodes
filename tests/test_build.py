@@ -177,13 +177,15 @@ def test_secrets_sync_is_baked_in(ign):
     timer = units["secrets-sync.timer"]
     assert timer["enabled"] is True
     assert "OnUnitActiveSec=15min" in timer["contents"]
+    assert "SOPS-encrypted" in units["secrets-sync.service"]["contents"]
+    assert "from git every 15 minutes" in timer["contents"]
 
 
 def test_ignition_has_no_secret_looking_literals(ign):
     blob = json.dumps(ign) + "".join(ign_file(ign, f["path"]) for f in ign["storage"]["files"])
-    assert not re.search(r"pst_[A-Za-z0-9]{16,}", blob)  # no Proton PAT
-    assert "netbird/setup_key" not in blob  # manifest references live in git templates, fetched at runtime
-    assert "/var/data/secrets/proton-pat" in blob  # the path is referenced, never the content
+    assert "AGE-SECRET" + "-KEY-" not in blob  # node keys are generated on the node, never baked in
+    assert not any(m in blob for m in ("sops_mac", "sops_lastmodified", "sops_age__"))  # no SOPS ciphertext markers
+    assert "ENC[AES256_GCM" not in blob
     assert "NB_SETUP_KEY=" not in blob
 
 

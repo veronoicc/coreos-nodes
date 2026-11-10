@@ -4,7 +4,6 @@ Opt-in: SMOKE_QCOW2=/path/to/fedora-coreos-*-qemu.x86_64.qcow2 pytest tests/test
 Download the image with the coreos-installer container (-s stable -p qemu -f qcow2.xz)
 and `xz -d` it. Uses KVM when /dev/kvm exists. Needs qemu-system-x86_64, qemu-img, ssh, podman.
 """
-import hashlib
 import os
 import shlex
 import shutil
@@ -16,7 +15,7 @@ from pathlib import Path
 import pytest
 
 import build
-from conftest import ROOT
+from conftest import ROOT, read_pin
 
 QCOW2 = os.environ.get("SMOKE_QCOW2")
 pytestmark = pytest.mark.skipif(not QCOW2, reason="set SMOKE_QCOW2 to run the QEMU smoke test")
@@ -161,84 +160,84 @@ def test_apps_sync_deploys_whoami(vm):
 
 SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR"]
 NB_KEY = "00000000-0000-0000-0000-000000000000"
-# Stand-in for pass-cli inside the VM: real Proton Pass was never reachable from the smoke test.
-FAKE_PASS_CLI = f"""#!/bin/bash
-case $1 in
-login) [ -n "$PROTON_PASS_PERSONAL_ACCESS_TOKEN" ] && mkdir -p "$PROTON_PASS_SESSION_DIR" && : > "$PROTON_PASS_SESSION_DIR/ok" ;;
-logout) rm -f "$PROTON_PASS_SESSION_DIR/ok" ;;
-item) [ -f "$PROTON_PASS_SESSION_DIR/ok" ] && [ "$3" = pass://ecstasy/netbird/setup_key ] && echo {NB_KEY} ;;
-esac
-"""
+SYNC = ("sudo", "SECRETS_SRC_DIR=/tmp/src", "/usr/local/bin/secrets-sync")
 
 
 def scp(vm, *args):
     subprocess.run(["scp", "-r", "-i", str(vm["key"]), "-P", str(vm["port"]), *SSH_OPTS, *args], check=True)
 
 
-def test_secrets_sync_units_and_clean_skip_without_token(vm):
+def put_repo_secrets(vm, src):
+    """Replace /tmp/src/secrets on the VM with the local src/secrets (SECRETS_SRC_DIR override: no repo download)."""
+    vm["ssh"]("rm", "-rf", "/tmp/src")
+    vm["ssh"]("mkdir", "-p", "/tmp/src")
+    scp(vm, str(src / "secrets"), "smoke@127.0.0.1:/tmp/src/")
+
+
+def test_fcos_ships_what_secrets_sync_needs(vm):
+    ssh = vm["ssh"]
+    for cmd in ("bash", "curl", "tar", "gzip", "sha256sum", "flock", "timeout", "install", "mktemp", "cmp", "chown"):
+        ssh("sh", "-c", f"command -v {cmd}")
+    # informational: which of the tools secrets-sync deliberately does NOT rely on are preinstalled
+    absent = ssh("sh", "-c", "command -v sops age age-keygen jq yq python3", check=False).stdout
+    print("FCOS ships among sops/age/age-keygen/jq/yq/python3:", absent.split() or "none of them")
+
+
+def test_secrets_sync_units(vm):
     ssh = vm["ssh"]
     assert "ExecStart=/usr/local/bin/secrets-sync" in ssh("systemctl", "cat", "secrets-sync.service").stdout
     assert "OnUnitActiveSec=15min" in ssh("systemctl", "cat", "secrets-sync.timer").stdout
     assert ssh("systemctl", "is-enabled", "secrets-sync.timer").stdout.strip() == "enabled"
     assert ssh("systemctl", "is-enabled", "secrets-sync.service").stdout.strip() == "enabled"
-    r = ssh("sudo", "systemctl", "start", "secrets-sync.service", check=False)
-    assert r.returncode == 0, r.stderr
-    assert ssh("systemctl", "show", "-p", "Result", "secrets-sync.service").stdout.strip() == "Result=success"
-    log = ssh("sudo", "journalctl", "-u", "secrets-sync.service", "--no-pager", "-o", "cat").stdout
-    assert "no Proton Pass token" in log
-    ssh("sudo", "test", "!", "-e", "/var/data/secrets/netbird.env")
 
 
-def test_push_token_writes_pat_root_0600(vm):
-    wrapper = vm["tmp"] / "bin" / "ssh"
-    wrapper.parent.mkdir(exist_ok=True)
-    wrapper.write_text(
-        "#!/bin/sh\n"
-        f"exec {shutil.which('ssh')} -i {vm['key']} -p {vm['port']} -o IdentitiesOnly=yes "
-        "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes \"$@\"\n"
-    )
-    wrapper.chmod(0o755)
-    token = "pst_" + "D" * 64 + "::SMOKEKEY"
-    tokfile = vm["tmp"] / "pat"
-    tokfile.write_text(token + "\n")
-    # The script then starts secrets-sync.service, which cannot download the example repo: only the PAT file is checked.
-    subprocess.run(
-        [str(ROOT / "scripts" / "push-token.sh"), "smoke@127.0.0.1", str(tokfile)],
-        env={**os.environ, "PATH": f"{wrapper.parent}:{os.environ['PATH']}"},
-        capture_output=True, timeout=600,
-    )
+def test_secrets_sync_generates_node_key_and_does_nothing_without_encrypted_files(vm, tmp_path):
     ssh = vm["ssh"]
-    assert ssh("sudo", "stat", "-c", "%a %U", "/var/data/secrets/proton-pat").stdout.strip() == "600 root"
-    assert ssh("sudo", "cat", "/var/data/secrets/proton-pat").stdout == f"PROTON_PASS_PERSONAL_ACCESS_TOKEN={token}\n"
-    assert vm["ssh"]("sudo", "journalctl", "-u", "secrets-sync.service", "--no-pager", "-o", "cat").stdout.count(token) == 0
-
-
-def test_secrets_sync_renders_netbird_env_and_restarts_unit(vm, tmp_path):
-    ssh = vm["ssh"]
-    fake = tmp_path / "pass-cli"
-    fake.write_text(FAKE_PASS_CLI)
     src = tmp_path / "src"
-    shutil.copytree(ROOT / "secrets", src / "secrets")  # the repo's real manifest and template
-    (src / "secrets" / "pass-cli.version").write_text(f"version=9.9.9\nsha256={hashlib.sha256(fake.read_bytes()).hexdigest()}\n")
-    ssh("rm", "-rf", "/tmp/src")
-    ssh("mkdir", "-p", "/tmp/src")
-    scp(vm, str(src / "secrets"), "smoke@127.0.0.1:/tmp/src/")
-    scp(vm, str(fake), "smoke@127.0.0.1:/tmp/pass-cli-9.9.9")
-    ssh("sudo", "install", "-D", "-m", "0755", "/tmp/pass-cli-9.9.9", "/var/data/bin/pass-cli-9.9.9")
-    sync = ("sudo", "SECRETS_SRC_DIR=/tmp/src", "/usr/local/bin/secrets-sync")
-    r = ssh(*sync, check=False)
+    (src / "secrets" / "ecstasy").mkdir(parents=True)
+    shutil.copy(ROOT / "secrets" / "tools.version", src / "secrets" / "tools.version")
+    shutil.copy(ROOT / "secrets" / "ecstasy" / "targets.conf", src / "secrets" / "ecstasy" / "targets.conf")  # the repo's real manifest only
+    put_repo_secrets(vm, src)
+    r = ssh(*SYNC, check=False)  # downloads the real pinned age-keygen from GitHub inside the VM
+    assert r.returncode == 0, r.stderr
+    assert ssh("sudo", "stat", "-c", "%a %U", "/var/data/secrets/age.key").stdout.strip() == "600 root"
+    assert ssh("sudo", "stat", "-c", "%a %U", "/var/data/secrets/age.pub").stdout.strip() == "644 root"
+    pin = read_pin()
+    derived = ssh("sudo", f"/var/data/bin/age-keygen-{pin['age_version']}", "-y", "/var/data/secrets/age.key").stdout.strip()
+    pub = ssh("sudo", "cat", "/var/data/secrets/age.pub").stdout.strip()
+    assert pub == derived and pub.startswith("age1")
+    assert "AGE-SECRET" + "-KEY-" not in r.stdout + r.stderr
+    ssh("sudo", "test", "!", "-e", "/var/data/secrets/netbird.env")
+    ssh("sudo", "test", "!", "-e", "/var/data/bin/sops-" + pin["sops_version"])  # not needed yet, not downloaded
+
+
+def test_secrets_sync_renders_netbird_env_and_restarts_unit(vm, tmp_path, real_tools):
+    ssh = vm["ssh"]
+    pub = ssh("sudo", "cat", "/var/data/secrets/age.pub").stdout.strip()
+    admin = tmp_path / "admin.key"
+    subprocess.run([real_tools.age_keygen, "-o", admin], check=True, capture_output=True)
+    admin_pub = subprocess.run([real_tools.age_keygen, "-y", admin], check=True, capture_output=True, text=True).stdout.strip()
+    src = tmp_path / "src"
+    (src / "secrets" / "ecstasy").mkdir(parents=True)
+    shutil.copy(ROOT / "secrets" / "tools.version", src / "secrets" / "tools.version")
+    shutil.copy(ROOT / "secrets" / "ecstasy" / "targets.conf", src / "secrets" / "ecstasy" / "targets.conf")
+    plain = tmp_path / "plain.env"
+    plain.write_text(f"NB_SETUP_KEY={NB_KEY}\nNB_MANAGEMENT_URL=https://netbird.veronoi.cc\n")
+    subprocess.run(  # throwaway admin key + the VM's own public key as recipients; the VM's private key never leaves it
+        [real_tools.sops, "--encrypt", "--age", f"{admin_pub},{pub}", "--input-type", "dotenv", "--output-type", "dotenv",
+         "--output", src / "secrets" / "ecstasy" / "netbird.env.sops", plain],
+        env={**os.environ, "HOME": str(tmp_path)}, check=True, capture_output=True,
+    )
+    put_repo_secrets(vm, src)
+    r = ssh(*SYNC, check=False)
     assert r.returncode == 0, r.stderr
     assert ssh("sudo", "stat", "-c", "%a %U", "/var/data/secrets/netbird.env").stdout.strip() == "600 root"
-    env_file = ssh("sudo", "cat", "/var/data/secrets/netbird.env").stdout
-    assert [l for l in env_file.splitlines() if not l.startswith("#")] == [
-        f"NB_SETUP_KEY={NB_KEY}",
-        "NB_MANAGEMENT_URL=https://netbird.veronoi.cc",
-    ]
+    assert ssh("sudo", "cat", "/var/data/secrets/netbird.env").stdout == f"NB_SETUP_KEY={NB_KEY}\nNB_MANAGEMENT_URL=https://netbird.veronoi.cc\n"
     show = ssh("systemctl", "show", "-p", "ConditionResult,ActiveState", "netbird.service").stdout
     assert "ConditionResult=yes" in show and "ActiveState=active" in show, show
     assert "netbird" in ssh("sudo", "podman", "ps", "--format", "{{.Names}}").stdout
-    ssh("sudo", "test", "!", "-e", "/run/secrets-sync")  # tmpfs session removed
     # second run: nothing is rewritten, netbird is not restarted
     before = ssh("systemctl", "show", "-p", "ActiveEnterTimestampMonotonic", "netbird.service").stdout
-    ssh(*sync)
+    r = ssh(*SYNC)
     assert ssh("systemctl", "show", "-p", "ActiveEnterTimestampMonotonic", "netbird.service").stdout == before
+    assert "updated" not in r.stdout + r.stderr

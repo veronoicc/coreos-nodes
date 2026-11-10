@@ -169,7 +169,7 @@ WantedBy=timers.target
 """
 
 SECRETS_SYNC_SERVICE = f"""[Unit]
-Description=Render secrets from Proton Pass and restart changed units
+Description=Render SOPS-encrypted secrets from git and restart changed units
 Wants=network-online.target
 After=network-online.target
 RequiresMountsFor={DATA}
@@ -185,7 +185,7 @@ WantedBy=multi-user.target
 """
 
 SECRETS_SYNC_TIMER = """[Unit]
-Description=Render secrets from Proton Pass every 15 minutes
+Description=Render secrets from git every 15 minutes
 
 [Timer]
 OnBootSec=15min
