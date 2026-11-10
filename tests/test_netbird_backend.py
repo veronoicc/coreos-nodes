@@ -1,4 +1,4 @@
-"""Self-hosted NetBird backend: Quadlet lint, init script and push-secrets (fake ssh, no node)."""
+"""Self-hosted NetBird backend: Quadlet lint and init script (fake ssh, no node)."""
 import os
 import re
 import stat
@@ -12,7 +12,6 @@ from conftest import ROOT
 
 APP = ROOT / "apps" / "netbird-backend"
 INIT = ROOT / "scripts" / "init-netbird-backend.sh"
-PUSH = ROOT / "scripts" / "push-secrets.sh"
 BASE = "/var/data/netbird-backend"
 DOMAIN = "netbird.veronoi.cc"
 EMAIL = "admin@example.org"
@@ -232,7 +231,7 @@ def test_init_generates_files(node):
 def test_init_prints_dns_firewall_and_next_steps(node):
     out = node["run"]("u@h", EMAIL).stdout
     for needle in (DOMAIN, "A record", "80", "443", "3478/udp", f"https://{DOMAIN}/setup",
-                   "push-secrets.sh", "--management-url", "setup key"):
+                   "push-token.sh", "secrets/netbird.env.tpl", "setup_key", "Proton Pass"):
         assert needle in out, needle
     secrets = secrets_of(node["data"] / "config.yaml")
     assert not any(s in out for s in secrets)
@@ -300,59 +299,3 @@ def test_init_without_deployed_units_fails_with_hint(node):
     assert r.returncode != 0
     assert "apps-sync" in r.stderr
     assert (node["data"] / "config.yaml").exists()  # files are kept; rerun after the sync works
-
-
-# ------------------------------------------------------- push-secrets URL
-
-
-@pytest.fixture
-def push(tmp_path):
-    bin_ = tmp_path / "bin"
-    bin_.mkdir()
-    out = tmp_path / "stdin"
-    (bin_ / "ssh").write_text(f'#!/bin/bash\necho "$@" > {tmp_path}/args\ncat > {out}\n')
-    (bin_ / "ssh").chmod(0o755)
-    key = tmp_path / "key"
-    key.write_text("SETUPKEY\n")
-
-    def run(*args):
-        r = subprocess.run(
-            [str(PUSH), *args], env={**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}"},
-            capture_output=True, text=True, timeout=30,
-        )
-        return r, (out.read_text() if out.exists() else None)
-
-    return run, key
-
-
-def test_push_default_unchanged(push):
-    run, key = push
-    r, sent = run("u@h", str(key))
-    assert r.returncode == 0 and sent == "NB_SETUP_KEY=SETUPKEY\n"
-
-
-def test_push_management_url_flag(push):
-    run, key = push
-    r, sent = run("u@h", str(key), "--management-url", f"https://{DOMAIN}")
-    assert r.returncode == 0, r.stderr
-    assert sent == f"NB_SETUP_KEY=SETUPKEY\nNB_MANAGEMENT_URL=https://{DOMAIN}\n"
-
-
-def test_push_management_url_flag_first(push):
-    run, key = push
-    r, sent = run("--management-url", f"https://{DOMAIN}:443", "u@h", str(key))
-    assert r.returncode == 0, r.stderr
-    assert sent.endswith(f"NB_MANAGEMENT_URL=https://{DOMAIN}:443\n")
-
-
-@pytest.mark.parametrize("bad", ["", "ftp://x", f"{DOMAIN}", "https://a b", "https://x\nNB_X=1"])
-def test_push_rejects_bad_url(push, bad):
-    run, key = push
-    r, sent = run("u@h", str(key), "--management-url", bad)
-    assert r.returncode != 0 and sent is None
-
-
-def test_push_url_flag_needs_value(push):
-    run, key = push
-    r, sent = run("u@h", str(key), "--management-url")
-    assert r.returncode != 0 and sent is None

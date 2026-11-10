@@ -185,6 +185,9 @@ Firewall: open at the provider: 80/tcp, 443/tcp (HTTP redirect, HTTPS/gRPC/WebSo
 Next steps:
   1. Once DNS resolves and the ports are open, open https://$domain/setup and create the first admin.
   2. In the dashboard create a setup key (Setup Keys -> Create).
-  3. Join this node to the backend:
-       scripts/push-secrets.sh $host [key-file] --management-url https://$domain
+  3. Store the key in Proton Pass: vault named after this node, item "netbird", field "setup_key"
+     (secrets/netbird.env.tpl already sets NB_MANAGEMENT_URL=https://$domain; README section "Secrets").
+  4. Give the node its Proton Pass token once, which also runs secrets-sync and starts the NetBird client:
+       scripts/push-token.sh $host [token-file]
+     (token already pushed: ssh $host sudo systemctl start secrets-sync)
 EOF
