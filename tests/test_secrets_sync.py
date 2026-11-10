@@ -10,6 +10,8 @@ import shutil
 import stat
 import subprocess
 import tarfile
+import json
+import yaml
 from pathlib import Path
 
 import pytest
@@ -37,6 +39,13 @@ case $url in
 *) exit 22 ;;
 esac
 """
+
+
+def sops_type(name: str) -> str:
+    for suffix, t in ((".env.sops", "dotenv"), (".yaml.sops", "yaml"), (".yml.sops", "yaml"), (".json.sops", "json"), (".ini.sops", "ini")):
+        if name.endswith(suffix):
+            return t
+    return "binary"
 
 
 def sha256(path) -> str:
@@ -93,16 +102,19 @@ class Env:
         self.pub.write_text(self.node_pub + "\n")
         return self.node_pub
 
-    def encrypt(self, name, text, recipients=None, node=NODE):
-        """SOPS dotenv file secrets/<node>/<name>, encrypted to the node key (default) or the given public keys."""
-        plain = self.tmp / "plain.env"
-        plain.write_text(text)
+    def encrypt(self, name, text, recipients=None, node=NODE, fmt=None):
+        """SOPS file secrets/<node>/<name>, encrypted to the node key (default) or the given public keys.
+
+        The sops type is picked here from the name, independently of the script, so a wrong mapping in secrets-sync
+        makes sops itself refuse to decrypt. text may be bytes (binary)."""
+        plain = self.tmp / "plain.in"
+        plain.write_bytes(text if isinstance(text, bytes) else text.encode())
         dest = self.src / "secrets" / node / name
         dest.parent.mkdir(parents=True, exist_ok=True)
         r = subprocess.run(
-            [self.tools.sops, "--encrypt", "--age", ",".join(recipients or [self.node_pub]), "--input-type", "dotenv",
-             "--output-type", "dotenv", "--output", dest, plain],
-            env={**os.environ, "HOME": str(self.home)}, capture_output=True, text=True,
+            [self.tools.sops, "--encrypt", "--age", ",".join(recipients or [self.node_pub]), "--input-type", fmt or sops_type(name),
+             "--output-type", fmt or sops_type(name), "--output", dest, plain],
+            env={**os.environ, "HOME": str(self.home)}, capture_output=True, text=True, cwd=self.tmp,  # not the repo: its .sops.yaml has no rule for temp paths
         )
         plain.unlink()
         assert r.returncode == 0, r.stderr
@@ -442,11 +454,142 @@ def test_shipped_manifest_alone_is_a_clean_noop(tmp_path, real_tools):
     assert e.key.exists() and e.systemctl() == []
 
 
-def test_only_some_encrypted_files_present_is_a_failure(env):
+def test_missing_target_is_skipped_with_one_log_line_and_the_rest_renders(env):
     (env.node_dir / "app.env.sops").unlink()
+    r = env.run()
+    skips = [l for l in r.stderr.splitlines() if "app.env.sops" in l]
+    assert len(skips) == 1 and "skipping" in skips[0]
+    assert "SETUP_KEY" not in r.stderr
+    assert env.read("netbird.env").startswith("# comment line")
+    assert not (env.out / "app.env").exists()
+    assert env.restarted() == {"netbird.service"}
+
+
+def test_admin_adds_files_in_steps(env):
+    """The shipped manifest lists a file before it exists; adding it later renders it and restarts only its units."""
+    (env.node_dir / "app.env.sops").rename(env.tmp / "held.sops")
+    env.run()
+    assert not (env.out / "app.env").exists()
+    (env.tmp / "held.sops").rename(env.node_dir / "app.env.sops")
+    env.run()
+    assert env.read("app.env") == f"DB_PASSWORD={DB_PASS}\nMODE=prod\n"
+    assert env.restarted() == {"app.service", "app2.service"}
+
+
+def test_skipped_target_never_removes_an_already_rendered_file(env):
+    env.run()
+    (env.node_dir / "app.env.sops").unlink()
+    env.run()
+    assert env.read("app.env") == f"DB_PASSWORD={DB_PASS}\nMODE=prod\n" and env.systemctl() == []
+
+
+def test_existing_but_broken_target_still_fails_everything(env):
+    env.run()
+    before = snapshot(env)
+    (env.node_dir / "app.env.sops").write_text("garbage\n")
     r = env.run(check=False)
-    assert r.returncode != 0 and "app.env.sops" in r.stderr
-    assert not (env.out / "netbird.env").exists()
+    assert r.returncode != 0 and snapshot(env) == before and env.systemctl() == []
+
+
+# ------------------------------------------------------------------ formats derived from the file name
+
+YAML = "server:\n  authSecret: yaml-VALUE-0005\n  ports:\n    - 3478\n  flag: true\n"
+
+
+def render(env, name, data, dest="out.dat", mode="0600", units="-"):
+    env.encrypt(name, data)
+    env.target(name, env.out / dest, mode, "-", units)
+    return env.run(check=False)
+
+
+@pytest.mark.parametrize("name", ["cfg.yaml.sops", "cfg.yml.sops", "my.app.cfg.yaml.sops", "x.env.yaml.sops"])
+def test_yaml_target_is_rendered_whole(env, name):
+    r = render(env, name, YAML, "cfg.yaml", "0600", "svc.service")
+    assert r.returncode == 0, r.stderr
+    got = yaml.safe_load((env.out / "cfg.yaml").read_text())
+    assert got == yaml.safe_load(YAML)  # not subject to the dotenv KEY=value rule
+    assert stat.S_IMODE((env.out / "cfg.yaml").stat().st_mode) == 0o600
+    assert "svc.service" in env.restarted()
+    assert_no_secrets(env, r)
+    assert "yaml-VALUE-0005" not in r.stdout + r.stderr
+
+
+def test_json_target(env):
+    r = render(env, "cfg.json.sops", '{"a": {"token": "json-VALUE-0006"}, "n": [1, 2]}\n')
+    assert r.returncode == 0, r.stderr
+    assert json.loads((env.out / "out.dat").read_text()) == {"a": {"token": "json-VALUE-0006"}, "n": [1, 2]}
+    assert "json-VALUE-0006" not in r.stdout + r.stderr
+
+
+def test_ini_target(env):
+    r = render(env, "cfg.ini.sops", "[main]\nkey = ini-VALUE-0007\n")
+    assert r.returncode == 0, r.stderr
+    assert "ini-VALUE-0007" in (env.out / "out.dat").read_text() and "[main]" in (env.out / "out.dat").read_text()
+
+
+@pytest.mark.parametrize("name", ["blob.sops", "key.pem.sops", "archive.tar.gz.sops", "data.sops", "plain.txt.sops", "env.sops", "noext"])
+def test_other_names_are_binary(env, name):
+    payload = bytes(range(256)) + b"\x00binary-VALUE-0008\xff\n"
+    r = render(env, name, payload)
+    assert r.returncode == 0, r.stderr
+    assert (env.out / "out.dat").read_bytes() == payload
+    assert b"binary-VALUE-0008" not in (r.stdout + r.stderr).encode()
+
+
+def test_dotenv_name_with_several_dots_is_still_dotenv(env):
+    r = render(env, "my.app.prod.env.sops", "A=1\n")
+    assert r.returncode == 0, r.stderr
+    assert (env.out / "out.dat").read_text() == "A=1\n"
+
+
+def test_empty_binary_is_a_failure(env):
+    """sops itself refuses empty yaml/json/dotenv documents; an empty binary file is the case the check exists for."""
+    env.run()
+    before = snapshot(env)
+    env.encrypt("empty.bin.sops", b"")
+    env.target("empty.bin.sops", env.out / "empty.out")
+    r = env.run(check=False)
+    assert r.returncode != 0 and "empty" in r.stderr
+    assert not (env.out / "empty.out").exists() and snapshot(env) == before
+
+
+@pytest.mark.parametrize("name,data", [("min.yaml.sops", "{}\n"), ("min.json.sops", "{}\n")])
+def test_minimal_documents_are_valid(env, name, data):
+    r = render(env, name, data)
+    assert r.returncode == 0, r.stderr
+    assert (env.out / "out.dat").read_text().strip() == "{}"
+
+
+def test_yaml_encrypted_to_another_key_fails_everything(env, tmp_path):
+    env.run()
+    before = snapshot(env)
+    env.encrypt("cfg.yaml.sops", YAML, [env.keygen(tmp_path / "other.key")])
+    env.target("cfg.yaml.sops", env.out / "cfg.yaml")
+    r = env.run(check=False)
+    assert r.returncode != 0 and snapshot(env) == before and env.systemctl() == []
+    assert "yaml-VALUE-0005" not in r.stdout + r.stderr
+
+
+def test_tampered_yaml_fails_everything(env):
+    env.run()
+    before = snapshot(env)
+    f = env.encrypt("cfg.yaml.sops", YAML)
+    f.write_text(f.read_text().replace("ENC[AES256_GCM,data:", "ENC[AES256_GCM,data:AAAA", 1))
+    env.target("cfg.yaml.sops", env.out / "cfg.yaml")
+    r = env.run(check=False)
+    assert r.returncode != 0 and snapshot(env) == before and env.systemctl() == []
+
+
+def test_yaml_second_sync_restarts_nothing_and_change_restarts_its_unit(env):
+    env.encrypt("cfg.yaml.sops", YAML)
+    env.target("cfg.yaml.sops", env.out / "cfg.yaml", "0600", "-", "svc.service")
+    env.run()
+    env.encrypt("cfg.yaml.sops", YAML)  # re-encrypted: new ciphertext, same plaintext
+    env.run()
+    assert env.systemctl() == []
+    env.encrypt("cfg.yaml.sops", YAML.replace("0005", "0009"))
+    env.run()
+    assert env.restarted() == {"svc.service"}
 
 
 # ------------------------------------------------------------------ manifest validation
@@ -637,4 +780,10 @@ def test_repo_pin_is_wellformed():
 
 def test_repo_manifest_for_ecstasy():
     conf = [l.split() for l in (ROOT / "secrets" / NODE / "targets.conf").read_text().splitlines() if l.strip() and not l.startswith("#")]
-    assert conf == [["netbird.env.sops", "/var/data/secrets/netbird.env", "0600", "root:root", "netbird.service"]]
+    assert conf == [
+        ["netbird.env.sops", "/var/data/secrets/netbird.env", "0600", "root:root", "netbird.service"],
+        [
+            "netbird-server.yaml.sops", "/var/data/netbird-backend/config.yaml", "0600", "root:root",
+            "netbird-server.service,netbird-dashboard.service,netbird-traefik.service",
+        ],
+    ]
