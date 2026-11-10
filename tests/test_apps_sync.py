@@ -187,6 +187,63 @@ def test_reset_unknown_app_fails(env):
     assert "nope" in r.stderr
 
 
+KEEP = "# apps-sync: keep\n"
+
+
+def test_reset_keeps_marked_volume_and_says_so(env):
+    env.put("db/dbdata.volume", KEEP + DB_VOLUME)
+    env.run()
+    r = env.run("reset", "db")
+    calls = env.calls()
+    assert "podman volume rm -f dbvol" not in calls
+    assert "podman rm -f --ignore systemd-db" in calls  # the container is still replaced
+    assert "systemctl start db.service" in calls and "systemctl start dbdata-volume.service" in calls
+    assert r.stderr.count("kept") == 1 and "dbvol" in r.stderr and "--include-persistent" in r.stderr
+
+
+def test_reset_include_persistent_removes_marked_volume(env):
+    env.put("db/dbdata.volume", KEEP + DB_VOLUME)
+    env.run()
+    r = env.run("reset", "db", "--include-persistent")
+    assert "podman volume rm -f dbvol" in env.calls()
+    assert "kept" not in r.stderr
+
+
+def test_reset_flag_before_app_name_works(env):
+    env.put("db/dbdata.volume", KEEP + DB_VOLUME)
+    env.run()
+    env.run("reset", "--include-persistent", "db")
+    assert "podman volume rm -f dbvol" in env.calls()
+
+
+def test_reset_removes_unmarked_volume_and_only_marked_ones_are_kept(env):
+    env.put("db/keep.volume", KEEP + "[Volume]\nVolumeName=keepvol\n")
+    env.run()
+    env.run("reset", "db")
+    calls = env.calls()
+    assert "podman volume rm -f dbvol" in calls and "podman volume rm -f keepvol" not in calls
+
+
+def test_marker_is_only_honoured_in_volume_files(env):
+    env.put("db/db.container", KEEP + DB_CONTAINER)
+    env.put("db/db.env", KEEP + DB_ENV)
+    env.run()
+    env.run("reset", "db")
+    assert "podman volume rm -f dbvol" in env.calls()
+
+
+def test_marker_must_be_the_whole_comment_line(env):
+    env.put("db/dbdata.volume", "[Volume]\nVolumeName=dbvol\nLabel=apps-sync: keep\n# not apps-sync: keep\n")
+    env.run()
+    env.run("reset", "db")
+    assert "podman volume rm -f dbvol" in env.calls()
+
+
+def test_reset_rejects_unknown_option(env):
+    r = env.run("reset", "db", "--bogus", check=False)
+    assert r.returncode != 0 and "usage" in r.stderr
+
+
 def test_source_without_apps_dir_fails_and_deletes_nothing(env):
     env.run()
     (env.src / "apps").rename(env.src / "apps-gone")
@@ -219,3 +276,76 @@ def test_download_requires_repo_url(env):
     r = env.run(use_src=False, extra_env={"APPS_REPO_URL": ""}, check=False)
     assert r.returncode != 0
     assert "APPS_REPO_URL" in r.stderr
+
+
+# ---- README* files are documentation: never deployed, never restart anything
+
+
+@pytest.mark.parametrize("name", ["README.md", "readme.md", "ReadMe.MD", "README", "README.txt"])
+def test_readme_is_not_deployed(env, name):
+    env.put(f"db/{name}", "docs\n")
+    env.run()
+    assert sorted(p.name for p in (env.apps / "db").iterdir()) == ["db.container", "db.env", "dbdata.volume"]
+
+
+def test_readme_only_change_restarts_nothing(env):
+    env.put("db/README.md", "v1\n")
+    env.run()
+    env.put("db/README.md", "v2\n")
+    env.run()
+    assert env.calls() == []
+
+
+def test_new_app_with_readme_only_deploys_nothing(env):
+    env.run()
+    env.put("docs-only/README.md", "x\n")
+    env.run()
+    assert not (env.apps / "docs-only").exists()
+    assert env.calls() == []
+
+
+@pytest.mark.parametrize("name", ["README.md", "readme.MD"])
+def test_already_deployed_readme_is_removed_quietly(env, name):
+    env.run()
+    (env.apps / "db" / name).write_text("left by an older apps-sync\n")
+    env.put(f"db/{name}", "docs\n")  # also in the repo now
+    env.run()
+    assert not (env.apps / "db" / name).exists()
+    assert env.calls() == []  # no stop, no daemon-reload, no restart
+    assert (env.apps / "db" / "db.container").exists()
+
+
+def test_deployed_readme_without_repo_counterpart_is_removed_quietly(env):
+    env.run()
+    (env.apps / "db" / "README.md").write_text("old\n")
+    env.run()
+    assert not (env.apps / "db" / "README.md").exists()
+    assert env.calls() == []
+
+
+def test_other_plain_files_still_restart_the_app(env):
+    env.put("db/README.md", "docs\n")
+    env.run()
+    env.put("db/db.env", "A=2\n")
+    env.run()
+    assert env.restarted() == {"db.service"}
+    env.put("db/extra.yml", "x: 1\n")
+    env.run()
+    assert (env.apps / "db" / "extra.yml").exists() and env.restarted() == {"db.service"}
+
+
+def test_readme_does_not_keep_a_removed_app_alive(env):
+    env.put("db/README.md", "docs\n")
+    env.run()
+    for f in ("db.container", "dbdata.volume", "db.env"):
+        env.drop(f"db/{f}")
+    env.run()
+    assert not (env.apps / "db").exists()
+    assert "systemctl stop db.service" in env.calls()
+
+
+def test_reset_ignores_readme(env):
+    env.put("db/README.md", "docs\n")
+    env.run()
+    env.run("reset", "db")
+    assert not any("README" in c or "readme" in c for c in env.calls())

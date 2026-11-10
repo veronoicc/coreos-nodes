@@ -1,7 +1,10 @@
 #!/bin/bash
 # Reconcile apps/<name>/* from the repo into the Quadlet directory.
-#   apps-sync              download the repo tarball and reconcile all apps
-#   apps-sync reset <app>  wipe <app>'s container + volumes and redeploy it
+#   apps-sync                                      download the repo tarball and reconcile all apps
+#   apps-sync reset [--include-persistent] <app>   wipe <app>'s container + volumes and redeploy it
+# README* files in an app dir are documentation: never deployed (a copy an older apps-sync left behind is removed
+# quietly, without daemon-reload or restart). A .volume file with the comment line "# apps-sync: keep" is persistent:
+# reset keeps that volume unless --include-persistent is given.
 # Env: APPS_REPO_URL, APPS_BRANCH (from /etc/apps-sync.env on the node),
 #      APPS_SRC_DIR (local repo root instead of downloading; for tests),
 #      APPS_DIR (managed dir), APPS_LOCK (lock file).
@@ -24,6 +27,12 @@ unit_suffix() {
         image) echo "-image.service" ;;
         *) return 1 ;;
     esac
+}
+
+# is_doc <file>: README* (any case) is documentation, not part of the deployment.
+is_doc() {
+    local f=${1##*/}
+    [[ ${f,,} == readme* ]]
 }
 
 # unit_of <file>: unit name for a Quadlet file, empty for other files.
@@ -70,6 +79,7 @@ deploy() {
     for app in "$@"; do
         for f in "$SRC/apps/$app"/*; do
             [ -f "$f" ] && [ ! -L "$f" ] || continue
+            ! is_doc "$f" || continue
             dest=$APPS_DIR/$app/${f##*/}
             if ! cmp -s "$f" "$dest"; then
                 install -D -m 0644 "$f" "$dest"
@@ -89,6 +99,10 @@ prune() {
         for f in "$d"*; do
             [ -e "$f" ] || continue
             name=${f##*/}
+            if is_doc "$name"; then
+                rm -f "$f"
+                continue
+            fi
             [ -f "$SRC/apps/$app/$name" ] && continue
             unit=$(unit_of "$name")
             [ -z "$unit" ] || systemctl stop "$unit" || true
@@ -143,7 +157,7 @@ ranked_files() {
 }
 
 reset() {
-    local app=$1 dir name unit f
+    local app=$1 include=$2 dir name unit f
     dir=$SRC/apps/$app
     [ -d "$dir" ] || die "no app '$app' in the repo"
     # Stop containers first, then volumes/networks.
@@ -159,7 +173,12 @@ reset() {
     for f in "$dir"/*.volume; do
         [ -f "$f" ] || continue
         name=$(setting "$f" VolumeName)
-        podman volume rm -f "${name:-systemd-$(basename "${f%.*}")}"
+        name=${name:-systemd-$(basename "${f%.*}")}
+        if [ "$include" -eq 0 ] && grep -qxF '# apps-sync: keep' "$f"; then
+            echo "apps-sync: kept persistent volume $name (--include-persistent removes it)" >&2
+            continue
+        fi
+        podman volume rm -f "$name"
     done
     deploy "$app"
     systemctl daemon-reload
@@ -167,6 +186,20 @@ reset() {
         unit=$(unit_of "$f")
         [ -z "$unit" ] || systemctl start "$unit"
     done < <(ranked_files "$dir" -n)
+}
+
+# parse_reset [--include-persistent] <app> (option in any position)
+parse_reset() {
+    local a app='' include=0
+    for a in "$@"; do
+        case $a in
+            --include-persistent) include=1 ;;
+            -*) die "usage: apps-sync reset [--include-persistent] <app>" ;;
+            *) [ -z "$app" ] || die "usage: apps-sync reset [--include-persistent] <app>"; app=$a ;;
+        esac
+    done
+    [ -n "$app" ] || die "usage: apps-sync reset [--include-persistent] <app>"
+    reset "$app" "$include"
 }
 
 main() {
@@ -177,8 +210,8 @@ main() {
     fetch "$work"
     case ${1:-sync} in
         sync) reconcile ;;
-        reset) [ -n "${2:-}" ] || die "usage: apps-sync reset <app>"; reset "$2" ;;
-        *) die "usage: apps-sync [reset <app>]" ;;
+        reset) shift; parse_reset "$@" ;;
+        *) die "usage: apps-sync [reset [--include-persistent] <app>]" ;;
     esac
 }
 
