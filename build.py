@@ -168,6 +168,33 @@ OnUnitActiveSec=10min
 WantedBy=timers.target
 """
 
+SECRETS_SYNC_SERVICE = f"""[Unit]
+Description=Render secrets from Proton Pass and restart changed units
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor={DATA}
+
+[Service]
+Type=oneshot
+TimeoutStartSec=15min
+EnvironmentFile=/etc/apps-sync.env
+ExecStart=/usr/local/bin/secrets-sync
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+SECRETS_SYNC_TIMER = """[Unit]
+Description=Render secrets from Proton Pass every 15 minutes
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target
+"""
+
 
 def netbird_quadlet(hostname):
     return f"""[Unit]
@@ -254,6 +281,7 @@ def render(config, name, node, root=ROOT):
                 inline_file("/etc/ssh/sshd_config.d/05-hostkeys.conf", HOST_KEYS, 0o600),
                 inline_file("/usr/local/bin/data-init", (files / "data-init").read_text(), 0o755),
                 inline_file("/usr/local/bin/apps-sync", (files / "apps-sync").read_text(), 0o755),
+                inline_file("/usr/local/bin/secrets-sync", (files / "secrets-sync").read_text(), 0o755),
                 inline_file(
                     "/etc/apps-sync.env",
                     f"APPS_REPO_URL={cfg['repo_url']}\nAPPS_BRANCH={cfg['branch']}\n",
@@ -270,6 +298,8 @@ def render(config, name, node, root=ROOT):
                 bind_mount(f"{DATA}/containers", "/var/lib/containers"),
                 bind_mount(f"{DATA}/netbird", "/var/lib/netbird"),
                 {"name": "apps-sync.service", "contents": APPS_SYNC_SERVICE},
+                {"name": "secrets-sync.service", "enabled": True, "contents": SECRETS_SYNC_SERVICE},
+                {"name": "secrets-sync.timer", "enabled": True, "contents": SECRETS_SYNC_TIMER},
                 {"name": "apps-sync.timer", "enabled": True, "contents": APPS_SYNC_TIMER},
             ]
         },

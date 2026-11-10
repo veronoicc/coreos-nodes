@@ -1,4 +1,5 @@
 import json
+import re
 
 import pytest
 
@@ -160,6 +161,30 @@ def test_apps_sync_is_baked_in(ign):
     assert units["apps-sync.timer"]["enabled"] is True
     assert "OnUnitActiveSec=10min" in units["apps-sync.timer"]["contents"]
     assert "OnBootSec=" in units["apps-sync.timer"]["contents"]
+
+
+def test_secrets_sync_is_baked_in(ign):
+    files = {f["path"]: f for f in ign["storage"]["files"]}
+    assert files["/usr/local/bin/secrets-sync"]["mode"] == 0o755
+    assert ign_file(ign, "/usr/local/bin/secrets-sync") == (ROOT / "files" / "secrets-sync").read_text()
+    units = {u["name"]: u for u in ign["systemd"]["units"]}
+    svc = units["secrets-sync.service"]["contents"].splitlines()
+    assert "ExecStart=/usr/local/bin/secrets-sync" in svc
+    assert "EnvironmentFile=/etc/apps-sync.env" in svc  # same repo_url/branch as apps-sync
+    assert "After=network-online.target" in svc and "Wants=network-online.target" in svc
+    assert "RequiresMountsFor=/var/data" in svc
+    assert units["secrets-sync.service"]["enabled"] is True  # runs at boot
+    timer = units["secrets-sync.timer"]
+    assert timer["enabled"] is True
+    assert "OnUnitActiveSec=15min" in timer["contents"]
+
+
+def test_ignition_has_no_secret_looking_literals(ign):
+    blob = json.dumps(ign) + "".join(ign_file(ign, f["path"]) for f in ign["storage"]["files"])
+    assert not re.search(r"pst_[A-Za-z0-9]{16,}", blob)  # no Proton PAT
+    assert "netbird/setup_key" not in blob  # manifest references live in git templates, fetched at runtime
+    assert "/var/data/secrets/proton-pat" in blob  # the path is referenced, never the content
+    assert "NB_SETUP_KEY=" not in blob
 
 
 def test_zincati_not_disabled(ign):
