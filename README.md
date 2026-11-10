@@ -7,7 +7,8 @@ installed to disk (no live-in-RAM design), so small servers work.
 - `config.yml`: shared settings (`node_domain`, `repo_url`, `branch`, `data_label`, `root_size_gib`, `users`).
 - `nodes/<name>.yml`: one file per node (`device`, optional `disk_gib`, optional `hostname`, optional extra `users`). Hostname is `<name>.<node_domain>`.
 - `build.py`: renders Butane, runs `butane --strict` and `ignition-validate` (podman containers) -> `build/<node>.ign`.
-- `files/`: scripts baked into the Ignition (`apps-sync`, `data-init`).
+- `files/`: scripts baked into the Ignition (`apps-sync`, `secrets-sync`, `data-init`).
+- `secrets/`: Proton Pass manifest for `secrets-sync` (`targets.conf`, `*.tpl` templates with `pass://` references, `pass-cli.version` pin). NOT baked in; synced at runtime. Contains no secret values.
 - `apps/<name>/*`: Quadlet apps (flat dir per app). NOT baked in; synced onto nodes at runtime.
 - Published: ISOs as assets of the rolling `latest` release; key-free `<node>.ign`/`.bu`/sha256 on GitHub Pages.
 
@@ -16,7 +17,7 @@ password logins (`00-hardening.conf`), root shrunk to `root_size_gib` plus an xf
 partition labelled `data` on the rest of the disk mounted at `/var/data`.
 `/var/lib/containers`, `/var/lib/netbird`, the SSH host key (`/var/data/ssh`) and
 `/var/data/secrets` (0700) live on that partition. NetBird runs as a Quadlet that
-only starts once `/var/data/secrets/netbird.env` exists. Zincati auto-updates stay on.
+only starts once `/var/data/secrets/netbird.env` exists (rendered by `secrets-sync` from Proton Pass, see [Secrets](#secrets-proton-pass)). Zincati auto-updates stay on.
 
 **Disk size:** root is `root_size_gib` (default 8, FCOS needs about 8 GiB), plus about 1 GiB boot area, plus a `data`
 partition on the rest. The disk must be at least `root_size_gib + 3` GiB, otherwise Ignition fails at first boot with
@@ -46,25 +47,61 @@ sudo coreos-installer install /dev/vda --ignition-url https://<owner>.github.io/
 Create `nodes/<name>.yml` (copy `nodes/ecstasy.yml`, set `device`), push to `main`. CI builds
 `<name>.iso` and `<name>.ign` automatically.
 
-## Secrets (NetBird setup key)
+## Secrets (Proton Pass)
 
-The repo is public; the key is never in git, Ignition, ISOs or Pages. After the node is up:
+> **Needs a reinstall:** `secrets-sync` (script, service, timer) is baked into the Ignition, and Ignition only runs on first boot. An
+> already installed node gets it only after reinstalling with the new ISO/Ignition; the `data` partition (secrets, SSH host key,
+> containers) is kept. With the **custom ISO**: attach the new `<node>.iso` from the `latest` release and boot it (it carries
+> `save-partlabel: [data]`). With the **stock ISO**:
+> `sudo coreos-installer install /dev/vda --save-partlabel data --ignition-url https://<owner>.github.io/<repo>/<node>.ign`.
+> Keep `root_size_gib` unchanged. Details: [Change users](#change-users-reinstall-keep-data). Everything else here (templates,
+> manifest, pass-cli version pin) is synced from git and needs no reinstall.
+
+The repo is public and holds only `pass://` references and non-secret literals. Every node keeps exactly **one** secret on disk, a
+Proton Pass personal access token (PAT) in `/var/data/secrets/proton-pat`. `secrets-sync` (boot after network-online, then every
+15 minutes, or `sudo systemctl start secrets-sync`) uses it to fetch all other secrets, renders them to files, and restarts only the
+units whose file changed. Adding a secret later is an edit in git, no new script.
+
+- `secrets/targets.conf`: one target per line: `<template> <destination> <mode> <owner:group|-> <units,comma|->`.
+- `secrets/<name>.tpl`: dotenv lines `KEY=pass://{node}/<item>/<field>` (fetched) or `KEY=literal`. `{node}` is the node's short hostname
+  (`ecstasy`), so each node has its own Proton vault named after it. The whole value must be the reference; values must be single-line.
+- `secrets/pass-cli.version`: pinned `version=` and `sha256=` of the `pass-cli` linux-x86_64 binary.
+
+First target: `secrets/netbird.env.tpl` -> `/var/data/secrets/netbird.env` (0600 root), restarting `netbird.service`
+(`NB_SETUP_KEY=pass://{node}/netbird/setup_key`, `NB_MANAGEMENT_URL=https://netbird.veronoi.cc`; for NetBird Cloud drop that line).
+
+**Set up a node** (Proton Pass web app, then your machine):
+
+1. Create the vault: Proton Pass -> new vault named like the node, e.g. `ecstasy`.
+2. In it create an item named `netbird` with a custom hidden field `setup_key` holding the NetBird setup key.
+3. Create a personal access token: pass.proton.me -> Settings -> Access tokens -> New token (needs a paid Pass plan). Name it, set the
+   mandatory expiry (1 hour to 1 year) and select **only that vault**; read-only (viewer) access is all `secrets-sync` needs (CLI
+   alternative: `pass-cli pat create --name ecstasy --expiration 1y`, then `pass-cli pat access grant --pat-name ecstasy --vault-name ecstasy --role viewer`).
+   The token string is shown once.
+4. Push the token (prompts hidden, or pass a file with the bare token or the `PROTON_PASS_PERSONAL_ACCESS_TOKEN=...` line):
 
 ```
-scripts/push-secrets.sh veronoicc@ecstasy.node.veronoi.cc [key-file]
+scripts/push-token.sh veronoicc@ecstasy.node.veronoi.cc [token-file]
 ```
 
-It writes `/var/data/secrets/netbird.env` (`NB_SETUP_KEY=...`, 0600 root) via `sudo install`
-and restarts `netbird.service`. Without a key-file it prompts. Before that, the unit is skipped by its `ConditionPathExists`.
+It validates the format, writes `/var/data/secrets/proton-pat` (`PROTON_PASS_PERSONAL_ACCESS_TOKEN=pst_...::...`, 0600 root) via `sudo install`
+and starts `secrets-sync.service`, so the node renders its secrets and NetBird starts right away. The token never appears on a command line.
+Before a token exists `secrets-sync` logs one line and exits 0; `netbird.service` is skipped by its `ConditionPathExists`.
 
-To join the node to the self-hosted backend (below) instead of NetBird Cloud, add the management URL; it is written
-as `NB_MANAGEMENT_URL=<url>` next to `NB_SETUP_KEY=` (the env var the NetBird client container reads):
+**How a sync works:** download the repo (same `repo_url`/`branch` as apps-sync), install the pinned `pass-cli` into `/var/data/bin/`
+(downloaded from the official GitHub release, sha256 checked before every use, other versions deleted; bump `secrets/pass-cli.version`
+in git to upgrade, no reinstall), log in with the PAT (sessions last 2 h, so every run logs in again) with the pass-cli session on
+tmpfs (`/run/secrets-sync`, removed after every run, nothing persists), render every target to a temp file next to its destination,
+and only if all fetches worked replace the destinations whose content changed. Secret values are never printed.
 
-```
-scripts/push-secrets.sh veronoicc@ecstasy.node.veronoi.cc [key-file] --management-url https://netbird.veronoi.cc
-```
+**Rotation / revocation:** tokens expire after at most 1 year. `pass-cli pat renew --pat-name ecstasy --expiration 1y` returns a **new**
+token string and the old one stops working at once: re-run `scripts/push-token.sh` with it. Revoke a node by deleting its token
+(`pass-cli pat delete --personal-access-token-id <id>`) or revoking its vault access; the node keeps its last rendered files.
 
-Without `--management-url` the client uses NetBird Cloud.
+**Failure modes:** Proton unreachable, token expired/revoked, a missing item/field or a pass-cli download/checksum failure: `secrets-sync`
+exits non-zero (see `journalctl -u secrets-sync`), keeps every existing rendered file untouched and restarts nothing; the units keep
+running with the last good secrets. A `pass-cli` release that breaks things never reaches nodes because the version is pinned. The
+secrets generated on the node by `scripts/init-netbird-backend.sh` are not in Proton Pass and need their own backup (see the backend section).
 
 ## Apps from git (no reinstall)
 
@@ -121,7 +158,7 @@ kept as `config.yaml.bak-*`). Do not use it on a node with data unless you inten
 
 1. Open `https://netbird.veronoi.cc/setup` and create the first admin (the dashboard and embedded Dex are served by the node itself).
 2. Dashboard -> Setup Keys -> create a key.
-3. `scripts/push-secrets.sh veronoicc@ecstasy.node.veronoi.cc [key-file] --management-url https://netbird.veronoi.cc`
+3. Put the key into Proton Pass (vault named after the node, item `netbird`, field `setup_key`, see [Secrets](#secrets-proton-pass)) and run `scripts/push-token.sh veronoicc@ecstasy.node.veronoi.cc [token-file]` (once per node; later `sudo systemctl start secrets-sync`). `secrets/netbird.env.tpl` already points the client at `https://netbird.veronoi.cc`.
 
 **Backup:** copy `/var/data/netbird-backend` (as root, ideally with the server stopped for a consistent SQLite copy). It holds the database, keys, config and ACME account/certificates; losing `config.yaml` makes the database unreadable.
 
@@ -156,10 +193,16 @@ REPO_URL=https://github.com/<owner>/<repo> scripts/build-iso.sh ecstasy    # dis
 Opt-in QEMU tests (need qemu, KVM recommended, ~2 GB downloads; skipped by default):
 
 ```
-# boot the stable QEMU image with the real Ignition: hostname, ssh, data partition, apps-sync, netbird gating
+# boot the stable QEMU image with the real Ignition: hostname, ssh, data partition, apps-sync, netbird gating, secrets-sync (fake pass-cli)
 SMOKE_QCOW2=/path/to/fedora-coreos-*-qemu.x86_64.qcow2 .venv/bin/python -m pytest tests/test_smoke_qemu.py
 # install from a custom ISO, then reinstall from another: the data partition must survive
 SMOKE_STOCK_ISO=$(ls build/iso-cache/*.iso) .venv/bin/python -m pytest tests/test_iso_reinstall_qemu.py
+```
+
+Opt-in test against real Proton Pass (login and "missing reference" behaviour only; needs a PAT whose vault may be empty):
+
+```
+PASS_CLI_TEST_TOKEN_FILE=/path/to/token PASS_CLI_BIN=/path/to/pass-cli .venv/bin/python -m pytest tests/test_pass_cli_real.py
 ```
 
 `REPO_URL` (env) overrides `repo_url` in `config.yml`; the build fails if neither is set.
