@@ -21,11 +21,13 @@ browser --443--> ecstasy (176.65.149.212): Traefik, TLS for auth.veronoi.cc (Let
 - **Authentik is published only on coke's mesh address** (`PublishPort=<mesh ip>:9000:9000` in `authentik-server.container`), never on
   `0.0.0.0`. Even if coke later gets a public IP or a port forward, Authentik is not reachable there. The address is not a secret.
   PostgreSQL and the worker publish nothing and live on the private `authentik.network`.
-- `settings.env` sets `AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS=10.89.10.1/32,100.127.17.6/32`: the gateway of `authentik.network` (fixed subnet
-  `10.89.10.0/24`) and ecstasy's NetBird IP. Today the published-port traffic reaches the container from the gateway, not from ecstasy's mesh IP
-  (which rule rewrites the source, podman/netavark or the NetBird client's NAT, is not verified); if that rewrite ever stops, e.g. after an update of
-  the unpinned NetBird client, Authentik would see `100.127.17.6` (stable per peer), so both are trusted. Trusting them
-  makes Authentik honour the `X-Forwarded-Proto/Host` from Traefik and build `https://auth.veronoi.cc/...` URLs.
+- `settings.env` sets `AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS=10.89.10.1/32,100.127.17.6/32`: ecstasy's NetBird IP (the source of
+  published-port traffic, which arrives over the mesh) and the gateway of `authentik.network` (fixed subnet `10.89.10.0/24`) as a
+  fallback. The gateway was the source before the NetBird client fwmark fix: its mark bit 0x2000 made netavark masquerade every
+  DNATed connection to the bridge gateway. With `NB_FWMARK_BASE=0x1000000` on the client that no longer happens, and a direct mesh
+  request from ecstasy arrives as `100.127.17.6`. The gateway entry stays so a regression (e.g. a client update restoring the old
+  marks) still yields correct `X-Forwarded-*` handling. Trusting these makes Authentik honour the `X-Forwarded-Proto/Host` from
+  Traefik and build `https://auth.veronoi.cc/...` URLs.
 - No SMTP (no recovery mails). Error reporting off (`AUTHENTIK_ERROR_REPORTING__ENABLED=false`) and update check off
   (`AUTHENTIK_DISABLE_UPDATE_CHECK=true`): no telemetry call-home that upstream allows to disable.
 

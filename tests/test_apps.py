@@ -393,9 +393,9 @@ def test_authentik_settings():
     env = env_file(APPS / "authentik" / "settings.env")
     assert env["AUTHENTIK_ERROR_REPORTING__ENABLED"] == "false" and env["AUTHENTIK_DISABLE_UPDATE_CHECK"] == "true"
     cidrs = [ipaddress.ip_network(c) for c in env["AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS"].split(",")]
-    # Traffic to the published mesh port reaches the container from the bridge gateway (masquerade), not from ecstasy's
-    # mesh IP: without trusting the gateway Authentik ignores X-Forwarded-Proto and serves http:// URLs. If the masquerade
-    # ever stops (e.g. a NetBird client update), the source is ecstasy's NetBird IP, so that one is trusted as well.
+    # Published mesh port traffic reaches the container from ecstasy's NetBird IP (the client's fwmark avoids netavark's
+    # masquerade, see build.py netbird_quadlet). The gateway stays trusted as a fallback in case the masquerade applies again:
+    # without trusting the source Authentik ignores X-Forwarded-Proto and serves http:// URLs.
     net = parse_quadlet(APPS / "authentik" / "authentik.network")["Network"]
     assert net["Subnet"] == ["10.89.10.0/24"] and net["Gateway"] == ["10.89.10.1"]
     assert cidrs == [ipaddress.ip_network("10.89.10.1/32"), ipaddress.ip_network("100.127.17.6/32")], (
