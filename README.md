@@ -252,6 +252,20 @@ order of steps, backup and security notes: [`apps/netbird/README.md`](apps/netbi
 [`apps/authentik/README.md`](apps/authentik/README.md), [`apps/traefik/README.md`](apps/traefik/README.md).
 The NetBird *client* (`netbird.container`, `NB_SETUP_KEY` from `secrets/<node>/netbird.env.sops`) is baked into the Ignition and is not an app.
 
+**Client fwmark fix (masquerade collision).** NetBird's default fwmark (`0x1bd21`/`0x1bd22`) has bit `0x2000` set, and netavark's
+hostport rule `meta mark & 0x2000 == 0x2000 masquerade` matched it: every connection DNATed to a published container port (Traefik on
+ecstasy, Authentik on coke) was masqueraded to the bridge gateway, so backends saw `172.30.0.1` / `10.89.10.1` instead of the real
+client or mesh IP. The baked client Quadlet sets `Environment=NB_FWMARK_BASE=0x1000000` (marks become `0x01000xxx`, bit `0x2000` clear).
+Nodes installed before this carry the same line as a drop-in, to be recreated by hand until the next reinstall:
+`/etc/containers/systemd/netbird.container.d/20-fwmark.conf` containing
+```
+[Container]
+# netavark masquerades packets with mark bit 0x2000 (nat POSTROUTING); the default NetBird marks 0x1bd2x contain it.
+Environment=NB_FWMARK_BASE=0x1000000
+```
+then `sudo systemctl daemon-reload && sudo systemctl restart netbird.service`. Check: `curl https://netbird.veronoi.cc/?ipcheck=1`
+on ecstasy shows the real client IP in Traefik's log, not `172.30.0.1`.
+
 ## Change users (reinstall, keep data)
 
 Ignition only runs on first boot, so changing `users` in `config.yml` means rebuilding the OS.

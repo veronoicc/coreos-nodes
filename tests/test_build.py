@@ -138,6 +138,10 @@ def test_netbird_quadlet_gated_and_secret_free(ign):
     assert "WantedBy=multi-user.target" in lines
     assert "Restart=on-failure" in lines
     assert "Environment=NB_HOSTNAME=ecstasy.node.example.org" in lines
+    # Regression guard: NetBird's default fwmark (0x1bd2x) has bit 0x2000, which netavark's masquerade matches, so DNATed
+    # traffic to published ports lost its source IP. The base must keep that bit clear.
+    base = next(l.split("=", 2)[2] for l in lines if l.startswith("Environment=NB_FWMARK_BASE="))
+    assert int(base, 0) & 0x2000 == 0 and int(base, 0) & 0xFF == 0
     # NET_RAW: podman (unlike docker) drops it by default; without it the client fails "failed to create ipv4 raw socket".
     for cap in ("NET_ADMIN", "SYS_ADMIN", "SYS_RESOURCE", "NET_RAW"):
         assert f"AddCapability={cap}" in lines

@@ -217,6 +217,9 @@ AddCapability=NET_RAW
 AddDevice=/dev/net/tun
 Volume=/var/lib/netbird:/var/lib/netbird:Z
 Environment=NB_HOSTNAME={hostname}
+# NetBird's default fwmark (0x00001bd2x) has bit 0x2000 set, which netavark's hostport masquerade rule matches; every DNATed
+# connection to a published container port was then masqueraded to the bridge gateway. Move the marks out of that bit.
+Environment=NB_FWMARK_BASE=0x1000000
 EnvironmentFile={SECRETS_ENV}
 
 [Service]
