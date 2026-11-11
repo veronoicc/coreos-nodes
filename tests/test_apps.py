@@ -349,8 +349,9 @@ def test_authentik_settings():
     env = env_file(APPS / "authentik" / "settings.env")
     assert env["AUTHENTIK_ERROR_REPORTING__ENABLED"] == "false" and env["AUTHENTIK_DISABLE_UPDATE_CHECK"] == "true"
     cidrs = [ipaddress.ip_network(c) for c in env["AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS"].split(",")]
-    # Traffic to the published mesh port reaches the container from the bridge gateway (podman masquerades it), not from
-    # ecstasy's mesh IP: without trusting the gateway Authentik ignores X-Forwarded-Proto and serves http:// URLs.
+    # Traffic to the published mesh port reaches the container from the bridge gateway (masquerade), not from ecstasy's
+    # mesh IP: without trusting the gateway Authentik ignores X-Forwarded-Proto and serves http:// URLs. If the masquerade
+    # ever stops (e.g. a NetBird client update), the source is ecstasy's NetBird IP, so that one is trusted as well.
     net = parse_quadlet(APPS / "authentik" / "authentik.network")["Network"]
     assert net["Subnet"] == ["10.89.10.0/24"] and net["Gateway"] == ["10.89.10.1"]
     assert cidrs == [ipaddress.ip_network("10.89.10.1/32"), ipaddress.ip_network("100.127.17.6/32")], (
@@ -387,11 +388,11 @@ def test_authentik_blueprint():
     provider = next(e for e in doc["entries"] if e["model"] == "authentik_providers_oauth2.oauth2provider")["attrs"]
     app = next(e for e in doc["entries"] if e["model"] == "authentik_core.application")
     assert provider["client_type"] == "confidential" and provider["client_id"] == "netbird"
+    # grant_types defaults to an empty list in Authentik 2026.8: without it every login fails "Invalid grant_type for provider".
+    assert set(provider["grant_types"]) == {"authorization_code", "refresh_token"}
     assert isinstance(provider["client_secret"], _Tag) and provider["client_secret"].tag == "Env"
     assert not isinstance(provider["signing_key"], str) and provider["signing_key"].tag == "Find"  # RS256 key: Dex verifies via JWKS
     # the redirect URIs are NetBird's embedded Dex callback and logout callback, strict
-    # grant_types defaults to an empty list in Authentik 2026.8: without it every login fails "Invalid grant_type for provider".
-    assert set(provider["grant_types"]) == {"authorization_code", "refresh_token"}
     assert {(r["matching_mode"], r["url"]) for r in provider["redirect_uris"]} == {
         ("strict", "https://netbird.veronoi.cc/oauth2/callback"), ("strict", "https://netbird.veronoi.cc/oauth2/logout/callback")}
     assert app["identifiers"] == {"slug": "netbird"} and app["attrs"]["provider"].tag == "KeyOf"
