@@ -1,3 +1,6 @@
 [Network]
 # Private network of the Authentik stack (database is only reachable from here, nothing is published except the
 # Authentik HTTP port on the mesh address, see authentik-server.container).
+# Fixed subnet: requests to the published port arrive from its gateway, which settings.env trusts for X-Forwarded-*.
+Subnet=10.89.10.0/24
+Gateway=10.89.10.1

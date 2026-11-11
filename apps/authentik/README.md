@@ -21,8 +21,9 @@ browser --443--> ecstasy (176.65.149.212): Traefik, TLS for auth.veronoi.cc (Let
 - **Authentik is published only on coke's mesh address** (`PublishPort=<mesh ip>:9000:9000` in `authentik-server.container`), never on
   `0.0.0.0`. Even if coke later gets a public IP or a port forward, Authentik is not reachable there. The address is not a secret.
   PostgreSQL and the worker publish nothing and live on the private `authentik.network`.
-- `settings.env` sets `AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS=100.64.0.0/10` (requests come from ecstasy over the mesh), so the
-  `X-Forwarded-Proto/Host` that Traefik sends make Authentik build `https://auth.veronoi.cc/...` URLs. Nothing else may set them.
+- `settings.env` sets `AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS=10.89.10.1/32`, the gateway of `authentik.network` (fixed subnet
+  `10.89.10.0/24`): podman delivers the mesh traffic to the published port from that gateway, not from ecstasy's mesh IP. Trusting it
+  makes Authentik honour the `X-Forwarded-Proto/Host` from Traefik and build `https://auth.veronoi.cc/...` URLs.
 - No SMTP (no recovery mails). Error reporting off (`AUTHENTIK_ERROR_REPORTING__ENABLED=false`) and update check off
   (`AUTHENTIK_DISABLE_UPDATE_CHECK=true`): no telemetry call-home that upstream allows to disable.
 

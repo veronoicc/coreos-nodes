@@ -349,7 +349,11 @@ def test_authentik_settings():
     env = env_file(APPS / "authentik" / "settings.env")
     assert env["AUTHENTIK_ERROR_REPORTING__ENABLED"] == "false" and env["AUTHENTIK_DISABLE_UPDATE_CHECK"] == "true"
     cidrs = [ipaddress.ip_network(c) for c in env["AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS"].split(",")]
-    assert cidrs == [MESH], "only the mesh may set X-Forwarded-* (Traefik reaches Authentik over it)"
+    # Traffic to the published mesh port reaches the container from the bridge gateway (podman masquerades it), not from
+    # ecstasy's mesh IP: without trusting the gateway Authentik ignores X-Forwarded-Proto and serves http:// URLs.
+    net = parse_quadlet(APPS / "authentik" / "authentik.network")["Network"]
+    assert net["Subnet"] == ["10.89.10.0/24"] and net["Gateway"] == ["10.89.10.1"]
+    assert cidrs == [ipaddress.ip_network("10.89.10.1/32")], "only the bridge gateway (= the published port) may set X-Forwarded-*"
     assert env["AUTHENTIK_POSTGRESQL__HOST"] == "authentik-postgres"
     assert not [k for k in env if "PASSWORD" in k or "SECRET" in k], "secrets only come from the rendered env file"
     assert "REDIS" not in " ".join(env), "2026.8 uses PostgreSQL only"
