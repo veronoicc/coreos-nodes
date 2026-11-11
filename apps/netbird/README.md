@@ -69,7 +69,7 @@ printf 'server:
   dataDir: "/var/lib/netbird"
   auth:
     issuer: "https://netbird.veronoi.cc/oauth2"
-    localAuthDisabled: true
+    localAuthDisabled: false
     signKeyRefreshEnabled: true
     sessionCookieEncryptionKey: "%s"
     dashboardRedirectURIs:
@@ -111,11 +111,10 @@ persisted in the account afterwards (`resolve domains: ...` in the log). It is a
 `PUT /api/accounts/<id>` with `{"settings": {..., "dns_domain": "mesh.veronoi.cc"}}`). Peers then resolve as `ecstasy.mesh.veronoi.cc`.
 It survives restarts and is part of the volume backup.
 
-`auth.issuer` stays the **embedded** IdP (`/oauth2`, so the server never depends on Authentik at startup) and `localAuthDisabled` is
-`true` (only Authentik on the login page, see "Login via Authentik"). **Bootstrap order:** the server refuses to start with
-`localAuthDisabled: true` while no other connector exists in its database (`cannot disable local authentication: no other identity
-providers configured`). On a fresh or reset install encrypt the config with `localAuthDisabled: false` first, do `/setup` and add the
-Authentik connector, then set it to `true` (`sops secrets/ecstasy/netbird-server.yaml.sops`), push and let `secrets-sync` restart the server.
+`auth.issuer` stays the **embedded** IdP (`/oauth2`, so the server never depends on Authentik at startup). The recipe writes
+`localAuthDisabled: false` on purpose: the server refuses to start with `true` while no other connector exists in its database
+(`cannot disable local authentication: no other identity providers configured`), which is always the case on a fresh or reset install.
+Do `/setup`, add the Authentik connector ("Login via Authentik"), then switch local login off with the command there.
 
 Commit and push:
 
@@ -191,7 +190,12 @@ connector, and the local login is switched off**:
    Client ID `netbird`, Client Secret = the value from step 1, Issuer `https://auth.veronoi.cc/application/o/netbird/`.
    The redirect URL the dashboard shows is `https://netbird.veronoi.cc/oauth2/callback`; the Authentik blueprint (`apps/authentik`) already
    contains exactly that (strict) plus the logout callback, so there is nothing to copy into Authentik. Click **Add Provider**.
-3. Log out. The login page redirects straight to `Authentik` (only connector). Sign in with your Authentik user (consent screen on the first login).
+3. Switch the local email/password login off (only Authentik remains on the sign-in page), then commit, push and let `secrets-sync`
+   restart the server:
+   ```
+   sops set --input-type yaml --output-type yaml secrets/ecstasy/netbird-server.yaml.sops '["server"]["auth"]["localAuthDisabled"]' true
+   ```
+   Log out. The login page redirects straight to `Authentik` (only connector). Sign in with your Authentik user (consent screen on the first login).
 4. A user signing in through Authentik appears in NetBird as its own user, not linked to the local `/setup` admin. If it should
    administer NetBird, promote it under Team -> Users (on ecstasy the Authentik user is the account owner).
 5. Optional group sync (JWT group claim `groups`): Settings -> Groups -> JWT group sync, as in the

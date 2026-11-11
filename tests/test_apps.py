@@ -5,6 +5,7 @@ import ipaddress
 import os
 import re
 import subprocess
+import textwrap
 
 import pytest
 import yaml
@@ -419,8 +420,10 @@ def walk(node):
 
 
 def readme_recipe(app, marker):
-    """The sops recipe from apps/<app>/README.md, verbatim: the first fenced block whose first line starts with marker."""
+    """The sops recipe from apps/<app>/README.md, verbatim: the first fenced block (also indented in a list) whose first line
+    starts with marker."""
     for block in (APPS / app / "README.md").read_text().split("```\n")[1::2]:
+        block = textwrap.dedent(block)
         if block.startswith(marker):
             return block
     raise AssertionError(f"no recipe starting with {marker!r} in apps/{app}/README.md")
@@ -468,8 +471,20 @@ def test_netbird_recipe_round_trip(tmp_path, real_tools):
     assert "authSecret: ENC[" in cipher and "encryptionKey: ENC[" in cipher
     cfg = yaml.safe_load(plain)["server"]
     assert cfg["auth"]["issuer"] == "https://netbird.veronoi.cc/oauth2"  # embedded IdP stays: no startup dependency on Authentik
-    # Contract change requested by the user: no local email/password login, the sign-in page only offers Authentik (no break-glass).
-    assert cfg["auth"]["localAuthDisabled"] is True
+    # The recipe only runs on a fresh/reset install, where the server refuses localAuthDisabled: true until a non-local
+    # connector exists: so it starts with false (local /setup), and a separate README command flips it once Authentik is added.
+    assert cfg["auth"]["localAuthDisabled"] is False
+    flip = readme_recipe("netbird", "sops set")
+    env = {**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}", "SOPS_AGE_KEY_FILE": str(tmp_path / "admin.key")}
+    r = subprocess.run(["bash", "-c", flip], cwd=work, capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    dec = subprocess.run([real_tools.sops, "--decrypt", "--input-type", "yaml", "--output-type", "yaml",
+                          "secrets/ecstasy/netbird-server.yaml.sops"], cwd=work, env=env, capture_output=True, text=True)
+    flipped = yaml.safe_load(dec.stdout)["server"]
+    # Contract change requested by the user: afterwards only Authentik on the sign-in page; every other value unchanged.
+    assert flipped["auth"].pop("localAuthDisabled") is True and cfg["auth"].pop("localAuthDisabled") is False
+    assert flipped == cfg
+    cfg["auth"]["localAuthDisabled"] = True
     # trustedPeers, not trustedHTTPProxies: with the latter the gateway 172.30.0.1 (ecstasy hairpinned to its own public IP) is
     # skipped as a "proxy" and the dashboard shows Traefik's container IP 172.30.0.2 (README.md).
     assert cfg["reverseProxy"]["trustedPeers"] == ["172.30.0.0/24"]
