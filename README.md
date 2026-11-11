@@ -153,14 +153,15 @@ units within 15 minutes, or immediately with `sudo systemctl start secrets-sync`
 **Key loss:**
 
 - Node key lost (data partition wiped or `age.key` deleted): the node generates a new key on its next run. Run `scripts/node-key.sh` and
-  `scripts/add-node.sh` again, then `sops updatekeys secrets/<node>/<file>.sops` for each file, commit, push.
+  `scripts/add-node.sh` again, then `sops updatekeys -y --input-type <dotenv|yaml|json|ini|binary> secrets/<node>/<file>.sops` for each
+  file (the type is required: sops cannot tell it from the `.sops` suffix), commit, push.
 - Admin key lost: you can no longer edit or re-encrypt, and nobody but the nodes can decrypt. Keep a backup. Recovery means a new admin
   key and recreating the secrets at their source, encrypted fresh to the new key and the node keys.
 
 **Security notes:**
 
 - Ciphertext in a public repo is public forever, git history included. A leaked node or admin age key decrypts everything ever encrypted to it, old commits too.
-- Revoking a node: remove its recipient (re-run `add-node.sh` or edit `.sops.yaml`, then `sops updatekeys`) AND rotate the actual secret values, because old commits stay decryptable with the old key.
+- Revoking a node: remove its recipient (re-run `add-node.sh` or edit `.sops.yaml`, then `sops updatekeys --input-type <type>` per file) AND rotate the actual secret values, because old commits stay decryptable with the old key.
 - There is no audit log of who decrypted what.
 - age X25519 is not post-quantum: harvest-now-decrypt-later applies to a public repo.
 - Keys visible, values encrypted: key names, file and folder names, modification times and recipient public keys are public.

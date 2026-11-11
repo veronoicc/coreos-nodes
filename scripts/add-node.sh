@@ -68,5 +68,5 @@ fi
 
 echo "node $node: recipients admin + node written to .sops.yaml"
 if [ "$changed_existing" -eq 1 ]; then
-    echo "hint: node key changed; re-encrypt existing files: sops updatekeys secrets/$node/<file>.sops" >&2
+    echo "hint: node key changed; re-encrypt existing files: sops updatekeys -y --input-type <dotenv|yaml|json|ini|binary> secrets/$node/<file>.sops" >&2
 fi
