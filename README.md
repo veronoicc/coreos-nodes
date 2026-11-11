@@ -40,13 +40,27 @@ unattended to the `device` from `nodes/<node>.yml`.
 **(b) Stock FCOS ISO** (provider only offers its own): boot the stock ISO, then
 
 ```
-sudo coreos-installer install /dev/vda --ignition-url https://<owner>.github.io/<repo>/<node>.ign
+sudo coreos-installer install <device> --ignition-url https://<owner>.github.io/<repo>/<node>.ign
 ```
+
+`<device>` is the node's `device` from `nodes/<node>.yml` (ecstasy: `/dev/sda`, coke: `/dev/vda`).
 
 ## Add a node
 
 Create `nodes/<name>.yml` (copy `nodes/ecstasy.yml`, set `device`), push to `main`. CI builds
-`<name>.iso` and `<name>.ign` automatically.
+`<name>.iso` and `<name>.ign` automatically (one matrix job per `nodes/*.yml`, published on the `latest` release and GitHub Pages).
+
+`apps: [traefik, ...]` lists the apps from `apps/` the node runs (see [Apps from git](#apps-from-git-no-reinstall)). Names must be unique
+and exist as `apps/<name>/`, or the build fails. A missing or empty `apps:` means the node runs **no apps**. The list is baked into the
+Ignition (`APPS_LIST` in `/etc/apps-sync.env`), so changing it needs a reinstall (below).
+
+**Bootstrap order for a new node, e.g. `coke` (Authentik, no inbound ports, reached over the NetBird mesh via ecstasy's Traefik):**
+
+1. Install it: stock ISO `sudo coreos-installer install /dev/vda --save-partlabel data --ignition-url https://veronoicc.github.io/coreos-nodes/coke.ign`, or the custom `coke.iso`.
+2. `scripts/node-key.sh veronoicc@coke.node.veronoi.cc` (prints the node's age public key).
+3. `scripts/add-node.sh coke <key>` (registers it as a recipient).
+4. Give coke a NetBird setup key so it joins the mesh: `secrets/coke/netbird.env.sops`, same recipe as for ecstasy ([Secrets](#secrets-sops--age)).
+5. Create the Authentik secrets as in [`apps/authentik/README.md`](apps/authentik/README.md). DNS for `auth.veronoi.cc` points at ecstasy, not coke.
 
 ## Secrets (SOPS + age)
 
@@ -55,7 +69,8 @@ Create `nodes/<name>.yml` (copy `nodes/ecstasy.yml`, set `device`), push to `mai
 > installed node gets them only after reinstalling with the new ISO/Ignition, once; the `data` partition (age key, SSH host key,
 > containers, NetBird state) is kept. With the **custom ISO**: attach the new `<node>.iso` from the `latest` release and boot it (it
 > carries `save-partlabel: [data]`). With the **stock ISO**:
-> `sudo coreos-installer install /dev/vda --save-partlabel data --ignition-url https://<owner>.github.io/<repo>/<node>.ign`.
+> `sudo coreos-installer install <device> --save-partlabel data --ignition-url https://<owner>.github.io/<repo>/<node>.ign`
+> (`<device>` = `device` in `nodes/<node>.yml`; ecstasy: `/dev/sda`).
 > Keep `root_size_gib` unchanged. Details: [Change users](#change-users-reinstall-keep-data). Everything else here (manifests,
 > encrypted files, `tools.version`, apps) is synced from git and needs no reinstall.
 
@@ -78,9 +93,11 @@ checksum file, so its sha256 was computed from the official asset). Checked on a
   are encrypted. Any new target of any format needs only a `targets.conf` line, never a change to the baked script.
 - `secrets/tools.version`: the pinned tool versions and sha256 values.
 
-Targets: `secrets/ecstasy/netbird.env.sops` -> `/var/data/secrets/netbird.env` (0600 root, restarts `netbird.service`, the client) and
-`secrets/ecstasy/netbird-server.yaml.sops` -> `/var/data/netbird-backend/config.yaml` (0600 root, restarts the three NetBird backend
-units, see [`apps/netbird-backend/README.md`](apps/netbird-backend/README.md)). The repo ships only the manifest lines.
+Targets: ecstasy: `netbird.env.sops` -> `/var/data/secrets/netbird.env` (0600 root, restarts `netbird.service`, the client) and
+`netbird-server.yaml.sops` -> `/var/data/netbird-server/config.yaml` (restarts the two NetBird server units, see
+[`apps/netbird/README.md`](apps/netbird/README.md)); coke: `netbird.env.sops` (same) and `authentik.env.sops` ->
+`/var/data/secrets/authentik.env` (restarts the three Authentik units, see [`apps/authentik/README.md`](apps/authentik/README.md)).
+The repo ships only the manifest lines.
 
 **Files that do not exist yet:** a manifest line whose encrypted file is not in the folder is **skipped with one log line**
 (`skipping <file>: not in secrets/<node>/ yet`); the other targets still render. The admin adds files in steps (the manifest is
@@ -143,22 +160,28 @@ units within 15 minutes, or immediately with `sudo systemctl start secrets-sync`
 - There is no audit log of who decrypted what.
 - age X25519 is not post-quantum: harvest-now-decrypt-later applies to a public repo.
 - Keys visible, values encrypted: key names, file and folder names, modification times and recipient public keys are public.
-- The NetBird backend's `config.yaml` (store encryption key, auth secrets) is ciphertext in this public repo: see the security note in [`apps/netbird-backend/README.md`](apps/netbird-backend/README.md).
+- The NetBird server `config.yaml` and the Authentik secrets are ciphertext in this public repo: see the security notes in [`apps/netbird/README.md`](apps/netbird/README.md) and [`apps/authentik/README.md`](apps/authentik/README.md).
 
 ## Apps from git (no reinstall)
 
-Add `apps/<name>/<file>.container|.volume|.network|...`, push to `main`. Each node runs
-`apps-sync.timer` (1 min after boot, then every 10 min). To sync now:
+Add `apps/<name>/<file>.container|.volume|.network|...`, push to `main`, and list the app in `apps:` of every node that should run it
+(`nodes/<node>.yml`; an app listed nowhere runs nowhere). Each node runs `apps-sync.timer` (1 min after boot, then every 10 min). To sync now:
 
 ```
 sudo systemctl start apps-sync
 ```
 
-`apps-sync` downloads `<repo_url>/archive/refs/heads/<branch>.tar.gz`, copies `apps/*` (except `README*`) into
-`/etc/containers/systemd/apps/<name>/`, deletes managed files whose app/file is gone (stopping their
+`apps-sync` downloads `<repo_url>/archive/refs/heads/<branch>.tar.gz`, copies the listed apps' files (`APPS_LIST`, except `README*`) into
+`/etc/containers/systemd/apps/<name>/`, deletes managed files whose app/file is gone **or whose app is no longer listed** (stopping their
 units; **volumes are kept**), runs `daemon-reload`, and restarts only units whose files changed
 (a changed non-Quadlet file such as an env file restarts that app's containers). Unchanged apps are not restarted.
-It never touches `netbird.container` or anything outside that directory.
+It never touches `netbird.container` or anything outside that directory. `reset` refuses an app that is not listed.
+After a run that deployed or removed a `.yml`/`.yaml`/`.toml` file (Traefik route files), `apps-sync` runs `systemctl reload traefik.service`
+(failure or no Traefik on the node is ignored), because Traefik's directory watcher does not see changes in subdirectories.
+
+The per-node list is baked in: a node installed before `apps:` existed has an older `apps-sync` that deploys **every** app in the repo until
+it is reinstalled (ecstasy is reinstalled anyway). That is harmless for Authentik: its three units have
+`ConditionPathExists=/var/data/secrets/authentik.env`, a file only coke gets (from `secrets/coke/authentik.env.sops`), so they are skipped elsewhere.
 
 To wipe an app's state (stop, `podman rm -f` its container, `podman volume rm` its `.volume` volumes, redeploy, start):
 
@@ -171,18 +194,17 @@ A `.volume` file containing the comment line `# apps-sync: keep` is **persistent
 `kept persistent volume <name>`); only `--include-persistent` removes it too. The marker is only read in `.volume` files; Quadlet
 ignores `#` comments.
 
-**Documentation convention:** every app has a `apps/<name>/README.md` for its specifics (see [`whoami`](apps/whoami/README.md),
-[`netbird-backend`](apps/netbird-backend/README.md)). `README*` files (any case) are never deployed: they do not restart anything, and a
+**Documentation convention:** every app has a `apps/<name>/README.md` for its specifics (see [`traefik`](apps/traefik/README.md),
+[`netbird`](apps/netbird/README.md), [`authentik`](apps/authentik/README.md)). `README*` files (any case) are never deployed: they do not restart anything, and a
 copy left on a node by an older `apps-sync` is removed quietly. Every other regular file in an app directory is deployed.
 
-## Self-hosted NetBird backend
+## Self-hosted NetBird and Authentik
 
-Optional control plane on ecstasy (`netbird.veronoi.cc`), fully declarative: Quadlets and plain config from `apps/netbird-backend/` via
-`apps-sync`, the server config with its secrets as `secrets/ecstasy/netbird-server.yaml.sops` via `secrets-sync`, state in Quadlet named
-volumes. No helper script. Setup, DNS/firewall, the `sops` recipe, backup, reset and the security note are in
-[`apps/netbird-backend/README.md`](apps/netbird-backend/README.md). It needs the one-time reinstall described under
-[Secrets](#secrets-sops--age) because `secrets-sync` and `apps-sync` are baked. The NetBird *client* (`netbird.container`, `NB_SETUP_KEY`
-from `secrets/ecstasy/netbird.env.sops`) is baked into the Ignition and is not an app.
+NetBird control plane on ecstasy (`netbird.veronoi.cc`), Authentik on coke (`auth.veronoi.cc`, no inbound ports, reached by ecstasy's
+Traefik over the NetBird mesh), shared Traefik: all declarative, nothing app-specific outside `apps/`. Setup, DNS/firewall, recipes,
+order of steps, backup and security notes: [`apps/netbird/README.md`](apps/netbird/README.md),
+[`apps/authentik/README.md`](apps/authentik/README.md), [`apps/traefik/README.md`](apps/traefik/README.md).
+The NetBird *client* (`netbird.container`, `NB_SETUP_KEY` from `secrets/<node>/netbird.env.sops`) is baked into the Ignition and is not an app.
 
 ## Change users (reinstall, keep data)
 
@@ -191,7 +213,7 @@ Edit `config.yml`, push, then reinstall the node while keeping the `data` partit
 because the reinstall rebuilds the OS from the new Ignition (`/home` is not preserved).
 
 - **Custom ISO:** the ISO already carries `--installer-config` with `save-partlabel: [data]`, so booting the new ISO keeps `data` and replaces the OS.
-- **Stock ISO:** `sudo coreos-installer install /dev/vda --save-partlabel data --ignition-url https://<owner>.github.io/<repo>/<node>.ign`
+- **Stock ISO:** `sudo coreos-installer install <device> --save-partlabel data --ignition-url https://<owner>.github.io/<repo>/<node>.ign` (`<device>` = `device` in `nodes/<node>.yml`)
 
 `--save-partlabel` matches the GPT partition label (`data`), not the filesystem label. The Ignition reuses the
 existing xfs (`wipe_filesystem: false`). Keep `root_size_gib` unchanged across such a reinstall: the data partition starts right after the root partition.
