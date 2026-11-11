@@ -10,6 +10,9 @@ device: /dev/sda
 # (config.yml) + boot area + minimum data partition do not fit.
 disk_gib: 20
 
+# Apps from apps/ this node runs (everything else is removed; empty or missing = no apps).
+apps: [traefik, netbird, authentik-route]
+
 # Extra users on top of config.yml (same shape):
 # users:
 #   - name: bob

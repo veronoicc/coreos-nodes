@@ -2,4 +2,4 @@
 # Traefik ACME account and certificates (acme.json, created 0600 by Traefik). Persistent: kept by `apps-sync reset`
 # (re-issuing certificates counts against Let's Encrypt rate limits), removed only with --include-persistent.
 [Volume]
-VolumeName=netbird-letsencrypt
+VolumeName=traefik-letsencrypt

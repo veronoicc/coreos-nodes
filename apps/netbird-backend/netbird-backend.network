@@ -1,5 +1,0 @@
-[Network]
-# Fixed subnet: netbird-server trusts forwarded client IPs from it (server.reverseProxy.trustedHTTPProxies in
-# config.yaml, see README.md). Only Traefik can reach it from outside.
-Subnet=172.30.0.0/24
-Gateway=172.30.0.1

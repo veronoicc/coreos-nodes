@@ -783,7 +783,7 @@ def test_repo_manifest_for_ecstasy():
     assert conf == [
         ["netbird.env.sops", "/var/data/secrets/netbird.env", "0600", "root:root", "netbird.service"],
         [
-            "netbird-server.yaml.sops", "/var/data/netbird-backend/config.yaml", "0600", "root:root",
-            "netbird-server.service,netbird-dashboard.service,netbird-traefik.service",
+            "netbird-server.yaml.sops", "/var/data/netbird-server/config.yaml", "0600", "root:root",
+            "netbird-server.service,netbird-dashboard.service",
         ],
     ]

@@ -4,18 +4,19 @@ Wants=network-online.target
 After=network-online.target
 RequiresMountsFor=/var/data
 # config.yaml is rendered by secrets-sync (secrets/ecstasy/netbird-server.yaml.sops). Until then the unit is skipped
-# instead of crash-looping; secrets-sync restarts it (and the dashboard and Traefik, same gate) when the file appears.
-ConditionPathExists=/var/data/netbird-backend/config.yaml
+# instead of crash-looping; secrets-sync restarts it (and the dashboard, same gate) when the file appears.
+ConditionPathExists=/var/data/netbird-server/config.yaml
 
 [Container]
 # Pinned; bump together with the dashboard via git (apps-sync restarts only changed units).
 Image=docker.io/netbirdio/netbird-server:0.82.1
 ContainerName=netbird-server
-Network=netbird-backend.network
+# Routed by Traefik (routes.yml); the shared network is defined by apps/traefik.
+Network=traefik.network
 # STUN needs direct UDP, it cannot go through the reverse proxy.
 PublishPort=3478:3478/udp
 Volume=netbird-data.volume:/var/lib/netbird
-Volume=/var/data/netbird-backend/config.yaml:/etc/netbird/config.yaml:ro,Z
+Volume=/var/data/netbird-server/config.yaml:/etc/netbird/config.yaml:ro,Z
 
 [Service]
 Restart=on-failure

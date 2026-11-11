@@ -1,0 +1,43 @@
+[Unit]
+Description=Traefik (shared reverse proxy, TLS via Let's Encrypt)
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/var/data
+
+[Container]
+# v3.7.13+ is what NetBird's own getting-started.sh requires (aliasHeadersStrategy).
+Image=docker.io/library/traefik:v3.7.18
+ContainerName=traefik
+Network=traefik.network
+PublishPort=80:80
+PublishPort=443:443
+# Routes: every app ships its own routes.yml (see README.md). The whole synced apps directory is mounted read-only and
+# the file provider reads it recursively, so this app never has to know which apps exist. No container socket.
+Volume=/etc/containers/systemd/apps:/etc/traefik/apps:ro,z
+Volume=traefik-letsencrypt.volume:/letsencrypt
+# Static config as flags (no static config file to misparse). Timeouts 0: long-lived gRPC/WebSocket streams (NetBird).
+# No ACME email on purpose (nothing personal in a public repo): expiry notice mails will not arrive, renewal is automatic.
+Exec=--log.level=INFO --accesslog=true \
+  --providers.file.directory=/etc/traefik/apps \
+  --entrypoints.web.address=:80 \
+  --entrypoints.web.http.aliasheadersstrategy=delete \
+  --entrypoints.web.http.redirections.entrypoint.to=websecure \
+  --entrypoints.web.http.redirections.entrypoint.scheme=https \
+  --entrypoints.websecure.address=:443 \
+  --entrypoints.websecure.http.aliasheadersstrategy=delete \
+  --entrypoints.websecure.transport.respondingtimeouts.readtimeout=0 \
+  --entrypoints.websecure.transport.respondingtimeouts.writetimeout=0 \
+  --entrypoints.websecure.transport.respondingtimeouts.idletimeout=0 \
+  --serverstransport.forwardingtimeouts.responseheadertimeout=0s \
+  --serverstransport.forwardingtimeouts.idleconntimeout=0s \
+  --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json \
+  --certificatesresolvers.letsencrypt.acme.tlschallenge=true
+
+[Service]
+Restart=on-failure
+# apps-sync runs `systemctl reload traefik` after route files changed: the file provider only watches the top level of the
+# directory, not the app subdirectories, and Traefik rebuilds its configuration on SIGHUP.
+ExecReload=/usr/bin/podman kill --signal HUP traefik
+
+[Install]
+WantedBy=multi-user.target

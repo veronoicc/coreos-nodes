@@ -1,0 +1,5 @@
+# apps-sync: keep
+# NetBird database (store.db, idp.db, events.db). Persistent: `apps-sync reset netbird` keeps it,
+# only `apps-sync reset --include-persistent netbird` removes it. Lives under /var/lib/containers (data partition).
+[Volume]
+VolumeName=netbird-data

@@ -1,4 +1,4 @@
-# Traefik dynamic config (file provider) for netbird.veronoi.cc. Synced by apps-sync; no secrets here.
+# Traefik routes for netbird.veronoi.cc (loaded by apps/traefik, see its README). Synced by apps-sync; no secrets here.
 # Paths per https://docs.netbird.io/selfhosted/external-reverse-proxy (combined container).
 # The optional NetBird Proxy feature (its separate gRPC service) is intentionally not routed.
 http:

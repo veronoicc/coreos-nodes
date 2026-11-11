@@ -5,13 +5,13 @@ After=network-online.target
 RequiresMountsFor=/var/data
 # Same gate as the server: a dashboard without a configured backend is useless, and secrets-sync restarts it together
 # with the server once config.yaml exists. dashboard.env itself comes from git (apps-sync) and holds no secret.
-ConditionPathExists=/var/data/netbird-backend/config.yaml
+ConditionPathExists=/var/data/netbird-server/config.yaml
 
 [Container]
 Image=docker.io/netbirdio/dashboard:v2.96.1
 ContainerName=netbird-dashboard
-Network=netbird-backend.network
-EnvironmentFile=/etc/containers/systemd/apps/netbird-backend/dashboard.env
+Network=traefik.network
+EnvironmentFile=/etc/containers/systemd/apps/netbird/dashboard.env
 
 [Service]
 Restart=on-failure
