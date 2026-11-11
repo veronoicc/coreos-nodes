@@ -222,6 +222,9 @@ sudo apps-sync reset --include-persistent <app>
 Networks hold no data and are always removed (Quadlet creates them with `podman network create --ignore`, so an existing network would be reused
 and a changed `Subnet=` never take effect); one still used by another app's containers (e.g. the shared `traefik.network`) is kept with a warning.
 A plain `apps-sync` run that deploys a changed `.network` file does **not** recreate the network: use `reset`.
+`reset` never stops a `-network.service` unit (Quadlet makes every container using the network, also other apps', `Requires=` it, so a stop
+would take them down); after removing the network it `systemctl restart`s the unit to recreate it (a kept network is only started).
+Restarting the unit also restarts the active containers that require it.
 
 **Nodes that still run the old `apps-sync`** (until their next reinstall) do not read `/etc/apps-sync.env` themselves (only the systemd unit does), so
 the plain form fails with `APPS_REPO_URL is not set`. Use this form instead (same with `--include-persistent`):

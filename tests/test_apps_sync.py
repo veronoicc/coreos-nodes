@@ -212,11 +212,10 @@ def test_reset_removes_network_between_container_removal_and_restart(env):
     calls = env.calls()
     order = [
         "systemctl stop db.service",
-        "systemctl stop dbnet-network.service",
         "podman rm -f --ignore systemd-db",
         "podman network rm systemd-dbnet",
         "systemctl daemon-reload",
-        "systemctl start dbnet-network.service",
+        "systemctl restart dbnet-network.service",
         "systemctl start db.service",
     ]
     idx = [calls.index(c) for c in order]
@@ -242,6 +241,17 @@ def test_reset_network_still_in_use_warns_and_continues(env):
     r = env.run("reset", "db")
     assert "systemd-dbnet" in r.stderr and "kept" in r.stderr
     assert "systemctl start db.service" in env.calls()
+    assert "systemctl restart dbnet-network.service" not in env.calls()
+    assert "systemctl start dbnet-network.service" in env.calls()
+
+
+def test_reset_never_stops_a_network_unit(env):
+    # Quadlet gives every container using the network Requires= on it: stopping it would take down other apps' containers
+    env.put("db/dbnet.network", NET)
+    env.run()
+    env.run("reset", "db")
+    assert not [c for c in env.calls() if c.startswith("systemctl stop") and c.endswith("-network.service")]
+    assert "systemctl stop db.service" in env.calls()
 
 
 # ---- apps-sync loads /etc/apps-sync.env itself (only the systemd unit has EnvironmentFile=)

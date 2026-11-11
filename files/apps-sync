@@ -197,13 +197,15 @@ ranked_files() {
 
 reset() {
     local app=$1 include=$2 dir name unit f
+    local -a recreated=() # network units whose network was removed: restart (the oneshot unit stays active)
     [[ " $APPS_LIST " == *" $app "* ]] || die "app '$app' is not in APPS_LIST"
     dir=$SRC/apps/$app
     [ -d "$dir" ] || die "no app '$app' in the repo"
-    # Stop containers first, then volumes/networks.
+    # Stop containers first, then volumes. Never stop a .network unit: Quadlet gives every container that uses the
+    # network (also other apps', e.g. traefik.network) Requires= on it, so the stop would propagate to them.
     while read -r f; do
         unit=$(unit_of "$f")
-        [ -z "$unit" ] || systemctl stop "$unit" || true
+        [ -z "$unit" ] || [[ $f == *.network ]] || systemctl stop "$unit" || true
     done < <(ranked_files "$dir" -rn)
     for f in "$dir"/*.container; do
         [ -f "$f" ] || continue
@@ -217,7 +219,11 @@ reset() {
         name=$(setting "$f" NetworkName)
         name=${name:-systemd-$(basename "${f%.*}")}
         podman network exists "$name" || continue
-        podman network rm "$name" || echo "apps-sync: network $name could not be removed (still in use?), kept" >&2
+        if podman network rm "$name"; then
+            recreated+=("$(unit_of "$f")")
+        else
+            echo "apps-sync: network $name could not be removed (still in use?), kept" >&2
+        fi
     done
     for f in "$dir"/*.volume; do
         [ -f "$f" ] || continue
@@ -233,7 +239,8 @@ reset() {
     systemctl daemon-reload
     while read -r f; do
         unit=$(unit_of "$f")
-        [ -z "$unit" ] || systemctl start "$unit"
+        if [ -z "$unit" ]; then continue; fi
+        if [[ " ${recreated[*]:-} " == *" $unit "* ]]; then systemctl restart "$unit"; else systemctl start "$unit"; fi
     done < <(ranked_files "$dir" -n)
 }
 
