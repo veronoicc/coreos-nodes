@@ -149,6 +149,10 @@ All three volume files carry `# apps-sync: keep`: `sudo apps-sync reset authenti
 `sudo apps-sync reset --include-persistent authentik` also deletes them (a fresh Authentik, `initial-setup` again; the blueprint is re-applied).
 Removing the app from git stops its units and keeps the volumes.
 
+On a node that still runs the old `apps-sync` (until its next reinstall) the plain command fails with `APPS_REPO_URL is not set`; use
+`sudo bash -c 'set -a; . /etc/apps-sync.env; apps-sync reset authentik'` (after a reinstall the plain form works). The installed version also does not
+recreate a changed network (`authentik.network`: `Subnet=`): stop the three units, `sudo podman network rm systemd-authentik`, start them.
+
 ## Upgrade
 
 Bump the tag in `authentik-server.container` and `authentik-worker.container` together (same version for both, a test checks it) and read the

@@ -212,12 +212,26 @@ The per-node list is baked in: a node installed before `apps:` existed has an ol
 it is reinstalled (ecstasy is reinstalled anyway). That is harmless for Authentik: its three units have
 `ConditionPathExists=/var/data/secrets/authentik.env`, a file only coke gets (from `secrets/coke/authentik.env.sops`), so they are skipped elsewhere.
 
-To wipe an app's state (stop, `podman rm -f` its container, `podman volume rm` its `.volume` volumes, redeploy, start):
+To wipe an app's state (stop, `podman rm -f` its container, `podman network rm` its `.network` networks, `podman volume rm` its `.volume` volumes, redeploy, start):
 
 ```
 sudo apps-sync reset <app>
 sudo apps-sync reset --include-persistent <app>
 ```
+
+Networks hold no data and are always removed (Quadlet creates them with `podman network create --ignore`, so an existing network would be reused
+and a changed `Subnet=` never take effect); one still used by another app's containers (e.g. the shared `traefik.network`) is kept with a warning.
+A plain `apps-sync` run that deploys a changed `.network` file does **not** recreate the network: use `reset`.
+
+**Nodes that still run the old `apps-sync`** (until their next reinstall) do not read `/etc/apps-sync.env` themselves (only the systemd unit does), so
+the plain form fails with `APPS_REPO_URL is not set`. Use this form instead (same with `--include-persistent`):
+
+```
+sudo bash -c 'set -a; . /etc/apps-sync.env; apps-sync reset <app>'
+```
+
+After a reinstall the plain form works. The installed version also does not remove networks on `reset`: after changing a `Subnet=` do it by hand,
+stop the app's units (`sudo systemctl stop <app units>`), `sudo podman network rm systemd-<name>`, then start them again.
 
 A `.volume` file containing the comment line `# apps-sync: keep` is **persistent**: `reset` keeps that volume (and prints
 `kept persistent volume <name>`); only `--include-persistent` removes it too. The marker is only read in `.volume` files; Quadlet

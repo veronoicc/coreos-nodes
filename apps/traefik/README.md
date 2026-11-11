@@ -63,6 +63,8 @@ unless the node has working public IPv6 with `80/443` open (Let's Encrypt prefer
 ## Backup, reset, upgrade
 
 - State: the `traefik-letsencrypt` volume. Certificates are re-issued automatically if it is lost (watch the Let's Encrypt rate limits).
-  `sudo apps-sync reset traefik` keeps it, `--include-persistent` removes it.
+  `sudo apps-sync reset traefik` keeps it, `--include-persistent` removes it. On a node that still runs the old `apps-sync` (until its next
+  reinstall) use `sudo bash -c 'set -a; . /etc/apps-sync.env; apps-sync reset traefik'` instead (after a reinstall the plain form works); that
+  version also does not recreate a changed network: stop the units, `sudo podman network rm systemd-<name>`, start them.
 - Upgrade: bump the tag in `traefik.container`, push. `apps-sync` restarts only the changed unit.
 - Debug: `sudo journalctl -u traefik`. Traefik logs every route file it fails to parse with the file name.

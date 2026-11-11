@@ -50,12 +50,29 @@ class Env:
         if use_src:
             env["APPS_SRC_DIR"] = str(self.src)
         env.setdefault("APPS_LIST", "whoami db")
+        env.setdefault("APPS_ENV_FILE", str(self.tmp / "no-such.env"))  # never read the developer's /etc/apps-sync.env
         env.update(extra_env or {})
+        env = {k: v for k, v in env.items() if v is not None}  # extra_env value None = unset
         self.log.write_text("")
         r = subprocess.run(["bash", str(SCRIPT), *args], env=env, capture_output=True, text=True)
         if check:
             assert r.returncode == 0, r.stderr
         return r
+
+    def fake_curl(self):
+        # writes a GitHub-style tarball (single top dir) to the -o target
+        tarball = self.tmp / "repo.tar.gz"
+        with tarfile.open(tarball, "w:gz") as t:
+            t.add(self.src, arcname="coreos-nodes-main")
+        curl = self.bin / "curl"
+        curl.write_text(
+            '#!/bin/bash\n'
+            f'echo "curl $*" >> "{self.log}"\n'
+            'out=""\n'
+            'while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done\n'
+            f'cp "{tarball}" "$out"\n'
+        )
+        curl.chmod(0o755)
 
     def calls(self):
         return self.log.read_text().splitlines()
@@ -182,6 +199,90 @@ def test_reset_uses_container_name_and_default_volume_name(env):
     assert "podman volume rm -f systemd-dbdata" in calls
 
 
+# ---- reset removes the app's Quadlet networks (an existing network is reused by `podman network create --ignore`,
+# so a changed Subnet= would otherwise never take effect)
+
+NET = "[Network]\nSubnet=10.89.10.0/24\n"
+
+
+def test_reset_removes_network_between_container_removal_and_restart(env):
+    env.put("db/dbnet.network", NET)
+    env.run()
+    env.run("reset", "db")
+    calls = env.calls()
+    order = [
+        "systemctl stop db.service",
+        "systemctl stop dbnet-network.service",
+        "podman rm -f --ignore systemd-db",
+        "podman network rm systemd-dbnet",
+        "systemctl daemon-reload",
+        "systemctl start dbnet-network.service",
+        "systemctl start db.service",
+    ]
+    idx = [calls.index(c) for c in order]
+    assert idx == sorted(idx)
+
+
+def test_reset_removes_network_but_keeps_marked_volume_and_honours_network_name(env):
+    env.put("db/dbnet.network", NET + "NetworkName=custom\n")
+    env.put("db/dbdata.volume", KEEP + DB_VOLUME)
+    env.run()
+    env.run("reset", "db")
+    calls = env.calls()
+    assert "podman network rm custom" in calls and "podman volume rm -f dbvol" not in calls
+
+
+def test_reset_network_still_in_use_warns_and_continues(env):
+    # e.g. a shared network (traefik.network) that another app's containers are attached to
+    env.put("db/dbnet.network", NET)
+    env.run()
+    (env.bin / "podman").write_text(
+        f'#!/bin/sh\necho "podman $*" >> "{env.log}"\n[ "$1 $2" = "network rm" ] && exit 1\nexit 0\n'
+    )
+    r = env.run("reset", "db")
+    assert "systemd-dbnet" in r.stderr and "kept" in r.stderr
+    assert "systemctl start db.service" in env.calls()
+
+
+# ---- apps-sync loads /etc/apps-sync.env itself (only the systemd unit has EnvironmentFile=)
+
+
+def test_env_file_supplies_list_for_a_manual_reset(env):
+    f = env.tmp / "apps-sync.env"
+    f.write_text('APPS_REPO_URL=https://example.invalid/r\nAPPS_BRANCH=main\nAPPS_LIST="whoami db"\n')
+    env.run("reset", "db", extra_env={"APPS_ENV_FILE": str(f), "APPS_LIST": None})
+    assert "podman rm -f --ignore systemd-db" in env.calls()
+
+
+def test_env_file_supplies_list_and_repo_for_sync(env):
+    env.fake_curl()
+    f = env.tmp / "apps-sync.env"
+    f.write_text('APPS_REPO_URL=https://github.com/o/r/\nAPPS_BRANCH=feat\nAPPS_LIST="db"\n')
+    env.run(use_src=False, extra_env={"APPS_ENV_FILE": str(f), "APPS_LIST": None})
+    assert (env.apps / "db" / "db.container").exists() and not (env.apps / "whoami").exists()
+    curl_call = next(c for c in env.calls() if c.startswith("curl"))
+    assert curl_call.endswith("https://github.com/o/r/archive/refs/heads/feat.tar.gz")
+
+
+def test_explicit_environment_wins_over_env_file(env):
+    f = env.tmp / "apps-sync.env"
+    f.write_text('APPS_LIST="whoami"\n')
+    env.run(extra_env={"APPS_ENV_FILE": str(f), "APPS_LIST": "db"})
+    assert (env.apps / "db" / "db.container").exists() and not (env.apps / "whoami").exists()
+
+
+def test_explicit_empty_list_wins_over_env_file(env):
+    f = env.tmp / "apps-sync.env"
+    f.write_text('APPS_LIST="whoami db"\n')
+    env.run(extra_env={"APPS_ENV_FILE": str(f), "APPS_LIST": ""})
+    assert not env.apps.exists() or not any(env.apps.iterdir())
+
+
+def test_missing_env_file_keeps_the_clear_error(env):
+    r = env.run(use_src=False, extra_env={"APPS_REPO_URL": None, "APPS_LIST": None}, check=False)
+    assert r.returncode != 0 and "APPS_REPO_URL is not set" in r.stderr
+
+
 def test_reset_unknown_app_fails(env):
     r = env.run("reset", "nope", check=False)
     assert r.returncode != 0
@@ -254,19 +355,7 @@ def test_source_without_apps_dir_fails_and_deletes_nothing(env):
 
 
 def test_download_uses_archive_url_and_extracts(env):
-    # fake curl: write a GitHub-style tarball (single top dir) to the -o target
-    tarball = env.tmp / "repo.tar.gz"
-    with tarfile.open(tarball, "w:gz") as t:
-        t.add(env.src, arcname="coreos-nodes-main")
-    curl = env.bin / "curl"
-    curl.write_text(
-        '#!/bin/bash\n'
-        f'echo "curl $*" >> "{env.log}"\n'
-        'out=""\n'
-        'while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done\n'
-        f'cp "{tarball}" "$out"\n'
-    )
-    curl.chmod(0o755)
+    env.fake_curl()
     env.run(use_src=False, extra_env={"APPS_REPO_URL": "https://github.com/o/r/", "APPS_BRANCH": "main"})
     assert (env.apps / "whoami" / "whoami.container").read_text() == WHOAMI
     curl_call = next(c for c in env.calls() if c.startswith("curl"))
@@ -388,7 +477,7 @@ def test_empty_list_deploys_nothing_and_removes_deployed(env, value):
 def test_unset_list_deploys_nothing(env):
     e = {k: v for k, v in os.environ.items() if k != "APPS_LIST"}
     e.update(PATH=f"{env.bin}:{e['PATH']}", APPS_DIR=str(env.apps), APPS_LOCK=str(env.tmp / "lock"),
-             APPS_SRC_DIR=str(env.src))
+             APPS_SRC_DIR=str(env.src), APPS_ENV_FILE=str(env.tmp / "no-such.env"))
     r = subprocess.run(["bash", str(SCRIPT)], env=e, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert not env.apps.exists() or not any(env.apps.iterdir())

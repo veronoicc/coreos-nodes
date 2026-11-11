@@ -1,11 +1,13 @@
 #!/bin/bash
 # Reconcile apps/<name>/* from the repo into the Quadlet directory.
 #   apps-sync                                      download the repo tarball and reconcile all apps
-#   apps-sync reset [--include-persistent] <app>   wipe <app>'s container + volumes and redeploy it
+#   apps-sync reset [--include-persistent] <app>   wipe <app>'s container, network and volumes and redeploy it
 # README* files in an app dir are documentation: never deployed (a copy an older apps-sync left behind is removed
 # quietly, without daemon-reload or restart). A .volume file with the comment line "# apps-sync: keep" is persistent:
 # reset keeps that volume unless --include-persistent is given.
-# Env: APPS_REPO_URL, APPS_BRANCH, APPS_LIST (space separated apps this node runs; from /etc/apps-sync.env on the node),
+# Env: APPS_REPO_URL, APPS_BRANCH, APPS_LIST (space separated apps this node runs). The systemd unit gets them from
+#      /etc/apps-sync.env (EnvironmentFile); run by hand, apps-sync reads APPS_ENV_FILE (default /etc/apps-sync.env)
+#      itself for every one of them that is not already set in the environment (the environment wins).
 #      APPS_SRC_DIR (local repo root instead of downloading; for tests),
 #      APPS_DIR (managed dir), APPS_LOCK (lock file).
 # Only apps in APPS_LIST are deployed. A deployed app that is not listed (or not in the repo) is stopped and removed
@@ -13,6 +15,21 @@
 # A deployed or removed *.yml|*.yaml|*.toml file (Traefik route files) triggers `systemctl reload traefik.service` after the
 # restarts: Traefik's directory watcher does not see changes in subdirectories. A failing or missing reload is ignored.
 set -euo pipefail
+
+APPS_ENV_FILE=${APPS_ENV_FILE:-/etc/apps-sync.env}
+
+# load_env_file: set each of the three variables from the env file unless it is already set (even empty).
+load_env_file() {
+    local v val
+    [ -r "$APPS_ENV_FILE" ] || return 0
+    for v in APPS_REPO_URL APPS_BRANCH APPS_LIST; do
+        [ -z "${!v+x}" ] || continue
+        # shellcheck source=/dev/null
+        val=$(. "$APPS_ENV_FILE" > /dev/null 2>&1 && [ -n "${!v+x}" ] && printf x%s "${!v}") || true
+        [ -z "$val" ] || printf -v "$v" %s "${val#x}"
+    done
+}
+load_env_file
 
 APPS_DIR=${APPS_DIR:-/etc/containers/systemd/apps}
 APPS_LIST=${APPS_LIST:-}
@@ -192,6 +209,15 @@ reset() {
         [ -f "$f" ] || continue
         name=$(setting "$f" ContainerName)
         podman rm -f --ignore "${name:-systemd-$(basename "${f%.*}")}"
+    done
+    # Networks hold no data: always remove them, so a changed Subnet= takes effect (Quadlet creates with `--ignore`
+    # and would reuse the old one). Still in use (shared network of another app): warn and keep going.
+    for f in "$dir"/*.network; do
+        [ -f "$f" ] || continue
+        name=$(setting "$f" NetworkName)
+        name=${name:-systemd-$(basename "${f%.*}")}
+        podman network exists "$name" || continue
+        podman network rm "$name" || echo "apps-sync: network $name could not be removed (still in use?), kept" >&2
     done
     for f in "$dir"/*.volume; do
         [ -f "$f" ] || continue

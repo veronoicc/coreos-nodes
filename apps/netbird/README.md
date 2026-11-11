@@ -211,6 +211,10 @@ README, "Key loss").
 the volume** (it prints `kept persistent volume ...`). Only `sudo apps-sync reset --include-persistent netbird` also deletes the NetBird
 database (users, peers, the Authentik connector). Removing the app from git stops its units and keeps the volume as well.
 
+On a node that still runs the old `apps-sync` (until its next reinstall) the plain command fails with `APPS_REPO_URL is not set`; use
+`sudo bash -c 'set -a; . /etc/apps-sync.env; apps-sync reset netbird'` (after a reinstall the plain form works; same with `--include-persistent`).
+The installed version also does not recreate a changed network: stop the app's units, `sudo podman network rm systemd-<name>`, start them.
+
 ## Upgrade
 
 Images are pinned in the Quadlets (`netbird-server`, `dashboard`). Bump the tags in git; `apps-sync` restarts only the changed units.
