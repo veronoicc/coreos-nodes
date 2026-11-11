@@ -138,7 +138,8 @@ def test_netbird_quadlet_gated_and_secret_free(ign):
     assert "WantedBy=multi-user.target" in lines
     assert "Restart=on-failure" in lines
     assert "Environment=NB_HOSTNAME=ecstasy.node.example.org" in lines
-    for cap in ("NET_ADMIN", "SYS_ADMIN", "SYS_RESOURCE"):
+    # NET_RAW: podman (unlike docker) drops it by default; without it the client fails "failed to create ipv4 raw socket".
+    for cap in ("NET_ADMIN", "SYS_ADMIN", "SYS_RESOURCE", "NET_RAW"):
         assert f"AddCapability={cap}" in lines
     assert "AddDevice=/dev/net/tun" in lines
     assert any(l.startswith("Volume=/var/lib/netbird:/var/lib/netbird") for l in lines)

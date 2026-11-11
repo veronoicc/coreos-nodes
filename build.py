@@ -212,6 +212,8 @@ Network=host
 AddCapability=NET_ADMIN
 AddCapability=SYS_ADMIN
 AddCapability=SYS_RESOURCE
+# podman (unlike docker) drops NET_RAW by default; without it: "failed to create ipv4 raw socket".
+AddCapability=NET_RAW
 AddDevice=/dev/net/tun
 Volume=/var/lib/netbird:/var/lib/netbird:Z
 Environment=NB_HOSTNAME={hostname}
