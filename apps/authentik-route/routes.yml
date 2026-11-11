@@ -14,4 +14,4 @@ http:
     authentik:
       loadBalancer:
         servers:
-          - url: http://100.64.0.2:9000
+          - url: http://100.127.197.215:9000

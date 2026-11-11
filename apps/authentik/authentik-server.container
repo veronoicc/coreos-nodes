@@ -19,7 +19,7 @@ Exec=server
 Network=authentik.network
 # Reachable ONLY on the mesh address of this node (stable per NetBird peer), never on 0.0.0.0, so a public interface
 # can never serve it. The same address is in apps/authentik-route/routes.yml; edit both once after joining the mesh.
-PublishPort=100.64.0.2:9000:9000
+PublishPort=100.127.197.215:9000:9000
 ShmSize=512m
 EnvironmentFile=/etc/containers/systemd/apps/authentik/settings.env
 EnvironmentFile=/var/data/secrets/authentik.env
