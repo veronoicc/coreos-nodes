@@ -388,6 +388,8 @@ def test_authentik_blueprint():
     assert isinstance(provider["client_secret"], _Tag) and provider["client_secret"].tag == "Env"
     assert not isinstance(provider["signing_key"], str) and provider["signing_key"].tag == "Find"  # RS256 key: Dex verifies via JWKS
     # the redirect URIs are NetBird's embedded Dex callback and logout callback, strict
+    # grant_types defaults to an empty list in Authentik 2026.8: without it every login fails "Invalid grant_type for provider".
+    assert set(provider["grant_types"]) == {"authorization_code", "refresh_token"}
     assert {(r["matching_mode"], r["url"]) for r in provider["redirect_uris"]} == {
         ("strict", "https://netbird.veronoi.cc/oauth2/callback"), ("strict", "https://netbird.veronoi.cc/oauth2/logout/callback")}
     assert app["identifiers"] == {"slug": "netbird"} and app["attrs"]["provider"].tag == "KeyOf"

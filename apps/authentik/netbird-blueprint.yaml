@@ -15,6 +15,8 @@ entries:
       client_type: confidential
       client_id: netbird
       client_secret: !Env AUTHENTIK_NETBIRD_CLIENT_SECRET
+      # Defaults to an empty list: without it every login fails "Invalid grant_type for provider".
+      grant_types: [authorization_code, refresh_token]
       # NetBird's embedded Dex is the OIDC client: its callback is <issuer>/callback, plus the logout callback.
       redirect_uris:
         - matching_mode: strict
