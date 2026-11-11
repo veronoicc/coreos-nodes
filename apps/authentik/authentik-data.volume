@@ -1,0 +1,5 @@
+# apps-sync: keep
+# Authentik /data: media (icons, uploaded files).
+# Persistent: `apps-sync reset authentik` keeps it, only `apps-sync reset --include-persistent authentik` removes it.
+[Volume]
+VolumeName=authentik-data

@@ -1,0 +1,17 @@
+# Traefik route for auth.veronoi.cc, deployed on the node that owns the public IP (ecstasy). Authentik itself runs on
+# coke, which accepts no inbound connections: Traefik reaches it over the NetBird mesh at coke's mesh address.
+# MESH ADDRESS: the same address is in apps/authentik/authentik-server.container (PublishPort); edit both once after
+# coke joined the mesh (a test checks they match). See apps/authentik/README.md.
+http:
+  routers:
+    authentik:
+      rule: Host(`auth.veronoi.cc`)
+      entryPoints: [websecure]
+      tls:
+        certResolver: letsencrypt
+      service: authentik
+  services:
+    authentik:
+      loadBalancer:
+        servers:
+          - url: http://100.64.0.2:9000

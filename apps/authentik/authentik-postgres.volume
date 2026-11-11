@@ -1,0 +1,5 @@
+# apps-sync: keep
+# PostgreSQL data directory. Without it every user, flow and the OIDC clients are gone. Back it up (README.md).
+# Persistent: `apps-sync reset authentik` keeps it, only `apps-sync reset --include-persistent authentik` removes it.
+[Volume]
+VolumeName=authentik-postgres

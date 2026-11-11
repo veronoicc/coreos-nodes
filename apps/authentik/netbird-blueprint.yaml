@@ -1,0 +1,35 @@
+# Authentik blueprint: OIDC provider + application for NetBird (docs: https://docs.netbird.io/selfhosted/identity-providers/authentik).
+# Mounted into the worker as /blueprints/custom/netbird.yaml; the client secret is read from the worker's environment
+# (secrets/coke/authentik.env.sops, AUTHENTIK_NETBIRD_CLIENT_SECRET). The same value is pasted once into NetBird.
+version: 1
+metadata:
+  name: NetBird
+entries:
+  - model: authentik_providers_oauth2.oauth2provider
+    id: netbird-provider
+    identifiers:
+      name: NetBird
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-explicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      client_type: confidential
+      client_id: netbird
+      client_secret: !Env AUTHENTIK_NETBIRD_CLIENT_SECRET
+      # NetBird's embedded Dex is the OIDC client: its callback is <issuer>/callback, plus the logout callback.
+      redirect_uris:
+        - matching_mode: strict
+          url: https://netbird.veronoi.cc/oauth2/callback
+        - matching_mode: strict
+          url: https://netbird.veronoi.cc/oauth2/logout/callback
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
+  - model: authentik_core.application
+    identifiers:
+      slug: netbird
+    attrs:
+      name: NetBird
+      provider: !KeyOf netbird-provider
+      meta_launch_url: https://netbird.veronoi.cc

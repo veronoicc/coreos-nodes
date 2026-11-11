@@ -1,0 +1,29 @@
+[Unit]
+Description=Authentik worker (background tasks, blueprints)
+Wants=network-online.target
+After=network-online.target authentik-postgres.service
+Requires=authentik-postgres.service
+RequiresMountsFor=/var/data
+# /var/data/secrets/authentik.env is rendered by secrets-sync (secrets/coke/authentik.env.sops); until then the unit is skipped
+# instead of crash-looping, and secrets-sync restarts all three Authentik units when it appears or changes.
+ConditionPathExists=/var/data/secrets/authentik.env
+
+[Container]
+Image=ghcr.io/goauthentik/server:2026.8.5
+ContainerName=authentik-worker
+Exec=worker
+Network=authentik.network
+ShmSize=512m
+EnvironmentFile=/etc/containers/systemd/apps/authentik/settings.env
+EnvironmentFile=/var/data/secrets/authentik.env
+Volume=authentik-data.volume:/data
+Volume=authentik-certs.volume:/certs
+# Blueprint: declares the NetBird OIDC provider and application (README.md). The worker applies it; its client secret
+# comes from the rendered env file via !Env, nothing secret is in git. No container socket (no outposts).
+Volume=/etc/containers/systemd/apps/authentik/netbird-blueprint.yaml:/blueprints/custom/netbird.yaml:ro,z
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

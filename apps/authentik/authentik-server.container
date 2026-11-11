@@ -1,0 +1,33 @@
+[Unit]
+Description=Authentik server
+Wants=network-online.target netbird.service
+# netbird.service is the baked NetBird client: the mesh interface (wt0) has to exist before the port can be bound to the
+# mesh address. It is only ordered, not required; if the bind still fails the unit is retried (below).
+After=network-online.target netbird.service authentik-postgres.service
+Requires=authentik-postgres.service
+RequiresMountsFor=/var/data
+# /var/data/secrets/authentik.env is rendered by secrets-sync (secrets/coke/authentik.env.sops); until then the unit is skipped
+# instead of crash-looping, and secrets-sync restarts all three Authentik units when it appears or changes.
+ConditionPathExists=/var/data/secrets/authentik.env
+# Retry forever: after a reboot the mesh address appears some seconds after the client started.
+StartLimitIntervalSec=0
+
+[Container]
+Image=ghcr.io/goauthentik/server:2026.8.5
+ContainerName=authentik-server
+Exec=server
+Network=authentik.network
+# Reachable ONLY on the mesh address of this node (stable per NetBird peer), never on 0.0.0.0, so a public interface
+# can never serve it. The same address is in apps/authentik-route/routes.yml; edit both once after joining the mesh.
+PublishPort=100.64.0.2:9000:9000
+ShmSize=512m
+EnvironmentFile=/etc/containers/systemd/apps/authentik/settings.env
+EnvironmentFile=/var/data/secrets/authentik.env
+Volume=authentik-data.volume:/data
+
+[Service]
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,3 @@
+[Network]
+# Private network of the Authentik stack (database is only reachable from here, nothing is published except the
+# Authentik HTTP port on the mesh address, see authentik-server.container).

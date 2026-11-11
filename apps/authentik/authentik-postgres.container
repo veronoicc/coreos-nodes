@@ -1,0 +1,28 @@
+[Unit]
+Description=Authentik PostgreSQL
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/var/data
+# /var/data/secrets/authentik.env is rendered by secrets-sync (secrets/coke/authentik.env.sops); until then the unit is skipped
+# instead of crash-looping, and secrets-sync restarts all three Authentik units when it appears or changes.
+ConditionPathExists=/var/data/secrets/authentik.env
+
+[Container]
+Image=docker.io/library/postgres:16.15-alpine
+ContainerName=authentik-postgres
+Network=authentik.network
+EnvironmentFile=/etc/containers/systemd/apps/authentik/settings.env
+EnvironmentFile=/var/data/secrets/authentik.env
+Volume=authentik-postgres.volume:/var/lib/postgresql/data
+HealthCmd=pg_isready -d authentik -U authentik
+HealthInterval=10s
+HealthStartPeriod=20s
+HealthRetries=5
+# The unit counts as started only once PostgreSQL accepts connections (the Authentik units order after it).
+Notify=healthy
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

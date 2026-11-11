@@ -1,0 +1,19 @@
+# Hostname: coke.<node_domain> unless `hostname:` is set here.
+# hostname: coke.example.org
+
+# Install target of the custom ISO (coreos-installer --dest-device). Booting
+# that ISO WIPES this disk without asking. Must be right for this machine.
+device: /dev/vda
+
+# Optional: disk size in GiB, checked against root_size_gib (see ecstasy.yml). Left out here.
+# disk_gib: 40
+
+# Apps from apps/ this node runs (everything else is removed; empty or missing = no apps).
+# Needs >= 8 GB RAM for Authentik. No inbound ports: reached over the NetBird mesh via ecstasy's Traefik.
+apps: [authentik]
+
+# Extra users on top of config.yml (same shape):
+# users:
+#   - name: bob
+#     sudo: false
+#     keys: ["ssh-ed25519 AAAA..."]
