@@ -468,7 +468,8 @@ def test_netbird_recipe_round_trip(tmp_path, real_tools):
     assert "authSecret: ENC[" in cipher and "encryptionKey: ENC[" in cipher
     cfg = yaml.safe_load(plain)["server"]
     assert cfg["auth"]["issuer"] == "https://netbird.veronoi.cc/oauth2"  # embedded IdP stays: no startup dependency on Authentik
-    assert cfg["auth"].get("localAuthDisabled", False) is False  # local login = break-glass when Authentik or the mesh is down
+    # Contract change requested by the user: no local email/password login, the sign-in page only offers Authentik (no break-glass).
+    assert cfg["auth"]["localAuthDisabled"] is True
     # trustedPeers, not trustedHTTPProxies: with the latter the gateway 172.30.0.1 (ecstasy hairpinned to its own public IP) is
     # skipped as a "proxy" and the dashboard shows Traefik's container IP 172.30.0.2 (README.md).
     assert cfg["reverseProxy"]["trustedPeers"] == ["172.30.0.0/24"]

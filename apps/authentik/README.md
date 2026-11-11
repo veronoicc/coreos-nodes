@@ -162,8 +162,8 @@ a data directory of another major version does not start. `apps-sync` restarts o
 
 ## Failure modes
 
-- Mesh down or ecstasy down: `https://auth.veronoi.cc` answers `502`/times out. NetBird keeps working: local login is the break-glass,
-  existing tunnels are unaffected, the NetBird server starts without Authentik (see the NetBird README).
+- Mesh down or ecstasy down: `https://auth.veronoi.cc` answers `502`/times out. NetBird keeps working (existing tunnels are unaffected, the
+  NetBird server starts without Authentik, see the NetBird README), but dashboard login is impossible: NetBird has no local login.
 - coke rebooted: `authentik-server` waits for the mesh interface and retries every 10 s; `authentik-postgres` is healthy before the
   server and worker start.
 - Wrong mesh address (peer re-registered): `authentik-server` fails to bind (unit retried) or ecstasy answers `502`: fix both files again.

@@ -69,7 +69,7 @@ printf 'server:
   dataDir: "/var/lib/netbird"
   auth:
     issuer: "https://netbird.veronoi.cc/oauth2"
-    localAuthDisabled: false
+    localAuthDisabled: true
     signKeyRefreshEnabled: true
     sessionCookieEncryptionKey: "%s"
     dashboardRedirectURIs:
@@ -111,7 +111,11 @@ persisted in the account afterwards (`resolve domains: ...` in the log). It is a
 `PUT /api/accounts/<id>` with `{"settings": {..., "dns_domain": "mesh.veronoi.cc"}}`). Peers then resolve as `ecstasy.mesh.veronoi.cc`.
 It survives restarts and is part of the volume backup.
 
-`auth.issuer` stays the **embedded** IdP (`/oauth2`) and `localAuthDisabled` stays `false`: see the next section for why.
+`auth.issuer` stays the **embedded** IdP (`/oauth2`, so the server never depends on Authentik at startup) and `localAuthDisabled` is
+`true` (only Authentik on the login page, see "Login via Authentik"). **Bootstrap order:** the server refuses to start with
+`localAuthDisabled: true` while no other connector exists in its database (`cannot disable local authentication: no other identity
+providers configured`). On a fresh or reset install encrypt the config with `localAuthDisabled: false` first, do `/setup` and add the
+Authentik connector, then set it to `true` (`sops secrets/ecstasy/netbird-server.yaml.sops`), push and let `secrets-sync` restart the server.
 
 Commit and push:
 
@@ -157,9 +161,15 @@ behind ecstasy's Traefik, 4. NetBird login via Authentik. Details of 2 and 3: [`
 NetBird 0.82 combined server **cannot** replace its embedded IdP: the embedded Dex is always enabled, and `auth.issuer` in `config.yaml`
 is its own issuer. An external issuer as the primary IdP is also ruled out here by design: the Authentik login is served by Authentik on
 coke, reachable only through ecstasy -> mesh -> coke, and the mesh needs NetBird first. So Authentik is added as **one more login
-connector next to the local login**:
+connector, and the local login is switched off**:
 
-- The embedded IdP and the local email/password login stay. They are the break-glass login when Authentik, coke or the mesh is down.
+- The embedded IdP stays (it is what keeps the server independent of Authentik), but its local email/password login is switched off with
+  `localAuthDisabled: true`: the login page only offers `Authentik`. Verified in the v0.82.1 sources (`NewEmbeddedIdPManager`): the server
+  only checks that a non-local connector exists in its own database (no network access to it), deletes the `local` connector, keeps local
+  users and tokens, and refuses to create new local users. **There is no break-glass login.** If Authentik, coke or the mesh is down you
+  cannot log into the dashboard (running tunnels are unaffected). Recovery: set `localAuthDisabled: false` via sops and push, or edit
+  `/var/data/netbird-server/config.yaml` on the node and `systemctl restart netbird-server`. The `local` connector is recreated, but no
+  local password exists any more: create a local user via the API/dashboard only if you can still log in, otherwise reset (Backup/Reset).
 - The connector is **not** declarable in `config.yaml` in 0.82.1 (`buildEmbeddedIdPConfig` in `combined/cmd/config.go` does not pass the
   connector list on), only through the dashboard or the API. That is the one manual step (below). Its definition lives in NetBird's
   database (volume `netbird-data`), so it survives restarts and is part of the volume backup.
@@ -181,14 +191,15 @@ connector next to the local login**:
    Client ID `netbird`, Client Secret = the value from step 1, Issuer `https://auth.veronoi.cc/application/o/netbird/`.
    The redirect URL the dashboard shows is `https://netbird.veronoi.cc/oauth2/callback`; the Authentik blueprint (`apps/authentik`) already
    contains exactly that (strict) plus the logout callback, so there is nothing to copy into Authentik. Click **Add Provider**.
-3. Log out. The login page now offers `Authentik` next to the local login. Sign in with your Authentik user (consent screen on the first login).
-4. Not verified here (no real login was run): a user signing in through Authentik is expected to appear in NetBird as its own user, not
-   linked to the local `/setup` admin. If it should administer NetBird, promote it under Team -> Users. Keep the local admin.
+3. Log out. The login page redirects straight to `Authentik` (only connector). Sign in with your Authentik user (consent screen on the first login).
+4. A user signing in through Authentik appears in NetBird as its own user, not linked to the local `/setup` admin. If it should
+   administer NetBird, promote it under Team -> Users (on ecstasy the Authentik user is the account owner).
 5. Optional group sync (JWT group claim `groups`): Settings -> Groups -> JWT group sync, as in the
    [NetBird docs](https://docs.netbird.io/selfhosted/identity-providers/authentik).
 
-What happens to the old embedded-IdP login: nothing changes for existing local users, tokens and the `/setup` admin; the dashboard's own
-OIDC client (`netbird-dashboard`, issuer `https://netbird.veronoi.cc/oauth2`) is unchanged. Authentik only adds a button.
+What happens to the old embedded-IdP login: with `localAuthDisabled: true` the `local` connector is removed at server start, existing
+local users stay in the database but cannot sign in; the dashboard's own OIDC client (`netbird-dashboard`, issuer
+`https://netbird.veronoi.cc/oauth2`) is unchanged.
 
 ## Backup
 
@@ -238,5 +249,5 @@ To rotate the Authentik client secret: change it in `secrets/coke/authentik.env.
 ## Failure mode
 
 If the backend is down, existing tunnels keep working (WireGuard peers talk directly or via relays already in use). New peers, login,
-ACL/route changes and relayed re-connections do not work until it is back. If Authentik or the mesh link to coke is down, only the
-Authentik button fails; local login and the whole mesh keep working.
+ACL/route changes and relayed re-connections do not work until it is back. If Authentik or the mesh link to coke is down, dashboard login
+is impossible (there is no local login); the mesh itself keeps working.
