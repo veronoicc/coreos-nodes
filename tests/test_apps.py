@@ -353,7 +353,9 @@ def test_authentik_settings():
     # ecstasy's mesh IP: without trusting the gateway Authentik ignores X-Forwarded-Proto and serves http:// URLs.
     net = parse_quadlet(APPS / "authentik" / "authentik.network")["Network"]
     assert net["Subnet"] == ["10.89.10.0/24"] and net["Gateway"] == ["10.89.10.1"]
-    assert cidrs == [ipaddress.ip_network("10.89.10.1/32")], "only the bridge gateway (= the published port) may set X-Forwarded-*"
+    assert cidrs == [ipaddress.ip_network("10.89.10.1/32"), ipaddress.ip_network("100.127.17.6/32")], (
+        "only the bridge gateway and ecstasy's mesh IP (= the path of the published port) may set X-Forwarded-*"
+    )
     assert env["AUTHENTIK_POSTGRESQL__HOST"] == "authentik-postgres"
     assert not [k for k in env if "PASSWORD" in k or "SECRET" in k], "secrets only come from the rendered env file"
     assert "REDIS" not in " ".join(env), "2026.8 uses PostgreSQL only"
