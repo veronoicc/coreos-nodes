@@ -23,11 +23,18 @@ iso=$(installer download -s stable -p metal -f iso -C build/iso-cache | tail -n 
 iso=build/iso-cache/$(basename "$iso")
 
 rm -f "dist/$node.iso" # iso customize -o refuses to overwrite
+# build.py writes this only for nodes with `network:`. It configures the live env (so the
+# installer is online with the node's static IP) and is forwarded to the installed system
+# under the same file name as the Ignition's keyfile, which is identical and overwrites it.
+# No --copy-network: nothing from the live env is copied besides this file.
+keyfile=()
+[ ! -f "build/$node-static.nmconnection" ] || keyfile=(--network-keyfile "build/$node-static.nmconnection")
 installer iso customize \
     --force \
     --dest-ignition "build/$node.ign" \
     --dest-device "$device" \
     --installer-config "build/$node.installer.yml" \
+    "${keyfile[@]}" \
     -o "dist/$node.iso" \
     "$iso"
 

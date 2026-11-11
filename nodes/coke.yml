@@ -5,6 +5,14 @@
 # that ISO WIPES this disk without asking. Must be right for this machine.
 device: /dev/vda
 
+# coke has no DHCP: fill this in (real values, then uncomment). See README "Static network".
+# network:
+#   interface: ens3            # exactly one of interface / mac (quote the mac)
+#   # mac: "52:54:00:12:34:56"
+#   ipv4: { address: 203.0.113.10/24, gateway: 203.0.113.1 }
+#   ipv6: { address: "2001:db8::10/64", gateway: "2001:db8::1" }   # optional
+#   dns: [1.1.1.1, 9.9.9.9]
+
 # Optional: disk size in GiB, checked against root_size_gib (see ecstasy.yml). Left out here.
 # disk_gib: 40
 

@@ -7,6 +7,7 @@ check it with ignition-validate (both via containers).
     python build.py --device <node>  install device from nodes/<node>.yml
 """
 import argparse
+import ipaddress
 import json
 import os
 import re
@@ -242,6 +243,76 @@ def node_apps(name, node, root):
     return apps
 
 
+NET_KEYS = {"interface", "mac", "ipv4", "ipv6", "dns"}
+IFACE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,14}")
+MAC = re.compile(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
+
+
+def net_family(name, net, key, version):
+    """(ip_interface, gateway) of net[key] (None if absent), validated."""
+    fam = net.get(key)
+    if fam is None:
+        return None
+    if not isinstance(fam, dict) or set(fam) != {"address", "gateway"}:
+        raise ConfigError(f"{name}: network.{key} needs exactly address and gateway")
+    try:
+        if "/" not in str(fam["address"]):
+            raise ValueError("no prefix length")
+        addr = ipaddress.ip_interface(str(fam["address"]))
+        gw = ipaddress.ip_address(str(fam["gateway"]))
+    except ValueError as e:
+        raise ConfigError(f"{name}: network.{key}: {e} (address needs a /prefix)") from e
+    if addr.version != version or gw.version != version:
+        raise ConfigError(f"{name}: network.{key} must hold IPv{version} address and gateway")
+    if gw not in addr.network or gw == addr.ip:
+        raise ConfigError(f"{name}: network.{key}.gateway {gw} must be another host inside {addr.network}")
+    return addr, gw
+
+
+def network_keyfile(name, net):
+    """NetworkManager keyfile for `network:` of a node (None = no block = DHCP)."""
+    if net is None:
+        return None
+    if not isinstance(net, dict):
+        raise ConfigError(f"{name}: network must be a mapping")
+    if set(net) - NET_KEYS:
+        raise ConfigError(f"{name}: unknown network keys {sorted(set(net) - NET_KEYS)}")
+    iface, mac = net.get("interface"), net.get("mac")
+    if (iface is None) == (mac is None):
+        raise ConfigError(f"{name}: network needs exactly one of interface or mac")
+    if iface is not None and not (isinstance(iface, str) and IFACE.fullmatch(iface)):
+        raise ConfigError(f"{name}: invalid network.interface {iface!r}")
+    if mac is not None and not (isinstance(mac, str) and MAC.fullmatch(mac)):
+        raise ConfigError(f"{name}: invalid network.mac {mac!r} (quote it: aa:bb:cc:dd:ee:ff)")
+    fams = {4: net_family(name, net, "ipv4", 4), 6: net_family(name, net, "ipv6", 6)}
+    if not any(fams.values()):
+        raise ConfigError(f"{name}: network needs ipv4 or ipv6")
+    dns = net.get("dns")
+    if not isinstance(dns, list) or not dns:
+        raise ConfigError(f"{name}: network.dns must be a non-empty list of IP addresses")
+    try:
+        servers = [ipaddress.ip_address(str(d)) for d in dns]
+    except ValueError as e:
+        raise ConfigError(f"{name}: network.dns: {e}") from e
+    out = ["[connection]", f"id={name}-static", "type=ethernet", "autoconnect=true"]
+    out.append(f"interface-name={iface}" if iface else f"\n[ethernet]\nmac-address={mac.upper()}")
+    for v in (4, 6):
+        out.append(f"\n[ipv{v}]")
+        if fams[v] is None:
+            out.append("method=disabled")
+            continue
+        addr, gw = fams[v]
+        out += [f"address1={addr.with_prefixlen},{gw}", "method=manual", "may-fail=false", "dns-search="]
+        mine = [str(s) for s in servers if s.version == v]
+        if mine:
+            out.append(f"dns={';'.join(mine)};")
+    return "\n".join(out) + "\n"
+
+
+def keyfile_path(name):
+    return f"/etc/NetworkManager/system-connections/{name}-static.nmconnection"
+
+
 def render(config, name, node, root=ROOT):
     """Butane config (as a dict) for one node."""
     cfg = load_config_dict(config)
@@ -260,7 +331,7 @@ def render(config, name, node, root=ROOT):
             )
     label = cfg["data_label"]
     files = Path(root) / "files"
-    return {
+    butane = {
         "variant": "fcos",
         "version": "1.7.0",
         "passwd": {"users": [passwd_user(u) for u in merged_users(cfg, node)]},
@@ -324,6 +395,10 @@ def render(config, name, node, root=ROOT):
             ]
         },
     }
+    keyfile = network_keyfile(name, node.get("network"))
+    if keyfile:
+        butane["storage"]["files"].append(inline_file(keyfile_path(name), keyfile, 0o600))
+    return butane
 
 
 def installer_config(config):
@@ -363,6 +438,13 @@ def build_node(name, root=ROOT, out=None):
     bu = to_yaml(render(config, name, load_node(name, root), root))
     ign = run_butane(bu)
     (out / f"{name}.bu").write_text(bu)
+    # Same file for the custom ISO (live env + installer); build-iso.sh passes it on if present.
+    iso_keyfile = out / f"{name}-static.nmconnection"
+    iso_keyfile.unlink(missing_ok=True)
+    keyfile = network_keyfile(name, load_node(name, root).get("network"))
+    if keyfile:
+        iso_keyfile.touch(mode=0o600)
+        iso_keyfile.write_text(keyfile)
     (out / f"{name}.installer.yml").write_text(installer_config(config))
     (out / f"{name}.ign").write_text(ign)
     run_validate(out / f"{name}.ign")

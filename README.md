@@ -27,7 +27,7 @@ partition on the rest. The disk must be at least `root_size_gib + 3` GiB, otherw
 
 ## Install a node
 
-Both paths use the same Ignition. Both need working DHCP and, for the stock ISO, network access to GitHub Pages.
+Both paths use the same Ignition. DHCP is the default; a node without DHCP sets `network:` (see [Static network](#static-network)). The stock ISO also needs network access to GitHub Pages.
 
 **(a) Custom ISO** (provider accepts your own ISO): download `<node>.iso` and its `.sha256`
 from the [`latest` release](../../releases/tag/latest), attach it, boot. It installs
@@ -45,9 +45,33 @@ sudo coreos-installer install <device> --ignition-url https://<owner>.github.io/
 
 `<device>` is the node's `device` from `nodes/<node>.yml` (ecstasy: `/dev/sda`, coke: `/dev/vda`).
 
+## Static network
+
+Optional `network:` in `nodes/<node>.yml`; absent = DHCP. Validated at build time (the build fails naming the node file):
+
+```yaml
+network:
+  interface: ens3        # exactly one of interface / mac
+  # mac: "52:54:00:12:34:56"   # quote it, YAML reads bare aa:bb:... as a number
+  ipv4: { address: 203.0.113.10/24, gateway: 203.0.113.1 }
+  ipv6: { address: 2001:db8::10/64, gateway: 2001:db8::1 }   # optional; at least one of ipv4/ipv6
+  dns: [1.1.1.1, 9.9.9.9]    # required
+```
+
+The build writes one NetworkManager keyfile, `/etc/NetworkManager/system-connections/<node>-static.nmconnection` (0600, root, `method=manual`,
+family without config `method=disabled`), into the Ignition. Check the interface name on the machine first (`ip link`): FCOS uses predictable names.
+
+- **Custom ISO:** `build-iso.sh` passes the same keyfile via `coreos-installer iso customize --network-keyfile`, so the live installer is online with the
+  node's IP (no hanging `NetworkManager-wait-online`). `--network-keyfile` is forwarded to the installed system under the same file name as the
+  Ignition's copy, which is identical and overwrites it: one profile. Nothing else is copied from the live env (no `--copy-network`).
+- **Stock ISO:** bring the live env online yourself (`sudo nmtui`), then install **without** `--copy-network` (the Ignition keyfile configures the installed system;
+  per the Fedora CoreOS docs Ignition-provided network config wins, but `--copy-network` would add a second profile for the same NIC):
+  `sudo coreos-installer install <device> --save-partlabel data --ignition-url https://<owner>.github.io/<repo>/<node>.ign`.
+  For a node with no `network:` block and no DHCP, use `nmtui` + `--copy-network` instead; then the live env's profile is the only config.
+
 ## Add a node
 
-Create `nodes/<name>.yml` (copy `nodes/ecstasy.yml`, set `device`), push to `main`. CI builds
+Create `nodes/<name>.yml` (copy `nodes/ecstasy.yml`, set `device`; add `network:` if the node has no DHCP), push to `main`. CI builds
 `<name>.iso` and `<name>.ign` automatically (one matrix job per `nodes/*.yml`, published on the `latest` release and GitHub Pages).
 
 `apps: [traefik, ...]` lists the apps from `apps/` the node runs (see [Apps from git](#apps-from-git-no-reinstall)). Names must be unique
