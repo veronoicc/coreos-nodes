@@ -157,6 +157,7 @@ class Env:
             "SECRETS_BIN_DIR": str(self.tools_dir),
             "SECRETS_LOCK": str(self.tmp / "lock"),
             "SECRETS_HOSTNAME_FILE": str(self.hostname),
+            "SECRETS_ISSUE_FILE": str(self.tmp / "issue.d" / "50-age-key.issue"),
             "FAKE_DIR": str(self.fake),
         }
         if use_src:
@@ -416,6 +417,17 @@ def test_garbage_key_file_fails_loudly(env):
     r = env.run(check=False)
     assert r.returncode != 0 and "age.key" in r.stderr
     assert not (env.out / "netbird.env").exists()
+
+
+def test_public_key_is_shown_on_the_console_login_screen(env):
+    """Nodes without inbound SSH: the key must be readable on the console before anyone can log in."""
+    issue = env.tmp / "issue.d" / "50-age-key.issue"
+    env.run()
+    assert env.node_pub in issue.read_text()
+    assert stat.S_IMODE(issue.stat().st_mode) == 0o644
+    issue.write_text("stale\n")  # e.g. key replaced on the data partition: the screen must follow the key
+    env.run()
+    assert env.node_pub in issue.read_text() and "stale" not in issue.read_text()
 
 
 def test_key_material_is_never_printed(env):

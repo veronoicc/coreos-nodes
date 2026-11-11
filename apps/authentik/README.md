@@ -44,8 +44,8 @@ All three units have `ConditionPathExists=/var/data/secrets/authentik.env`: befo
 ## Needs a reinstall (once)
 
 Same as for ecstasy (the baked `apps-sync`/`secrets-sync` with per-node app lists): install coke with its ISO/Ignition. Root README,
-"Install a node" and "Add a node". Run `scripts/node-key.sh <user>@coke...` and `scripts/add-node.sh coke <node key>` afterwards
-(root README, "Secrets").
+"Install a node" and "Add a node". Then read coke's age public key above the login prompt on its console (coke has no inbound SSH
+and joins the mesh only after this; no login needed) and run `scripts/add-node.sh coke <node key>` (root README, "Add a node").
 
 ## The bootstrap order
 

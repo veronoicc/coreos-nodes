@@ -57,7 +57,10 @@ Ignition (`APPS_LIST` in `/etc/apps-sync.env`), so changing it needs a reinstall
 **Bootstrap order for a new node, e.g. `coke` (Authentik, no inbound ports, reached over the NetBird mesh via ecstasy's Traefik):**
 
 1. Install it: stock ISO `sudo coreos-installer install /dev/vda --save-partlabel data --ignition-url https://veronoicc.github.io/coreos-nodes/coke.ign`, or the custom `coke.iso`.
-2. `scripts/node-key.sh veronoicc@coke.node.veronoi.cc` (prints the node's age public key).
+2. Get the node's age public key. coke accepts no inbound SSH and is not on the mesh yet (joining needs the secret this key unlocks),
+   and users have no console password, so `secrets-sync` prints the key above the console login prompt
+   (`/etc/issue.d/50-age-key.issue`): open the provider's console and read it there, no login needed (press Enter if the prompt was
+   drawn before the key existed). `scripts/node-key.sh <user>@<host>` fetches it over SSH for a node you can reach.
 3. `scripts/add-node.sh coke <key>` (registers it as a recipient).
 4. Give coke a NetBird setup key so it joins the mesh: `secrets/coke/netbird.env.sops`, same recipe as for ecstasy ([Secrets](#secrets-sops--age)).
 5. Create the Authentik secrets as in [`apps/authentik/README.md`](apps/authentik/README.md). DNS for `auth.veronoi.cc` points at ecstasy, not coke.
@@ -76,7 +79,8 @@ Ignition (`APPS_LIST` in `/etc/apps-sync.env`), so changing it needs a reinstall
 
 The repo is public and holds the secrets only as [SOPS](https://github.com/getsops/sops) ciphertext. Each node generates its own
 [age](https://github.com/FiloSottile/age) key, `/var/data/secrets/age.key` (0600 root, never leaves the node, survives a reinstall on the
-`data` partition), and publishes the public half in `/var/data/secrets/age.pub` (also printed to the journal). A node decrypts only its
+`data` partition), and publishes the public half in `/var/data/secrets/age.pub` (also printed to the journal and shown above the
+console login prompt). A node decrypts only its
 own folder `secrets/<node>/` (`<node>` = short hostname, e.g. `ecstasy`). `secrets-sync` runs at boot after network-online, then every
 15 minutes, or on demand with `sudo systemctl start secrets-sync`. It decrypts each encrypted file with
 `sops --decrypt --input-type <type> --output-type <type>` into its destination and restarts only the units whose file changed.
