@@ -1,6 +1,6 @@
 [Network]
 # Shared by every app that Traefik routes to (Quadlet unit names are global, so apps in other directories add
 # Network=traefik.network). Fixed subnet: the NetBird server trusts forwarded client IPs from it
-# (server.reverseProxy.trustedHTTPProxies in its config.yaml, see apps/netbird/README.md).
+# (server.reverseProxy.trustedPeers in its config.yaml, see apps/netbird/README.md).
 Subnet=172.30.0.0/24
 Gateway=172.30.0.1

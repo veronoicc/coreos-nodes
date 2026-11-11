@@ -78,7 +78,7 @@ printf 'server:
     cliRedirectURIs:
       - "http://localhost:53000/"
   reverseProxy:
-    trustedHTTPProxies:
+    trustedPeers:
       - "172.30.0.0/24"
   store:
     engine: "sqlite"
@@ -90,8 +90,26 @@ printf 'server:
 
 `--filename-override` makes the stdin input match the `creation_rules` of `.sops.yaml` (recipients: your admin key and the node key),
 `--output` writes the file only when encryption succeeded (a failed `> file` redirect would leave an empty file that makes
-`secrets-sync` fail). Keep `172.30.0.0/24` in sync with `apps/traefik/traefik.network` (the server trusts forwarded client IPs only from it).
+`secrets-sync` fail). Keep `172.30.0.0/24` in sync with `apps/traefik/traefik.network`.
+
+`reverseProxy.trustedPeers` = the sources whose `X-Forwarded-For` the server believes (here: Traefik, same subnet). Do **not** use
+`trustedHTTPProxies` for the subnet: the server skips every `X-Forwarded-For` entry inside it, and a client that reaches Traefik through
+the bridge (ecstasy itself: DNAT hairpin to its own public IP, source `172.30.0.1` = the network gateway) is then not found in the header
+and falls back to Traefik's container address `172.30.0.2`, which is what the dashboard showed as ecstasy's Public IP. Traefik is the
+only proxy and overwrites `X-Forwarded-For` with the address it sees (entrypoint `forwardedHeaders.trustedIPs` is unset), so the last
+entry is the client; no proxy list or count is needed. Peers elsewhere always showed their real public IP; ecstasy itself now shows
+`172.30.0.1` (its connection to its own public address comes from the bridge, there is no real public source to report).
+
 Edit later with `sops secrets/ecstasy/netbird-server.yaml.sops`.
+
+### Peer DNS domain `mesh.veronoi.cc` (dashboard, not config.yaml)
+
+The peer DNS domain (`<peer>.<domain>`, default `netbird.selfhosted`) is **not** a `config.yaml` key in the combined server: the
+`dnsDomain` field is overwritten with the exposed host and the server picks `netbird.selfhosted` on a fresh install, or the domain
+persisted in the account afterwards (`resolve domains: ...` in the log). It is an account setting (`settings.dns_domain`, stored in
+`netbird-data`), so set it once in the dashboard (Settings, the DNS domain field of the account; exact menu label not verified here) to `mesh.veronoi.cc` (or
+`PUT /api/accounts/<id>` with `{"settings": {..., "dns_domain": "mesh.veronoi.cc"}}`). Peers then resolve as `ecstasy.mesh.veronoi.cc`.
+It survives restarts and is part of the volume backup.
 
 `auth.issuer` stays the **embedded** IdP (`/oauth2`) and `localAuthDisabled` stays `false`: see the next section for why.
 

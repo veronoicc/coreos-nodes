@@ -460,7 +460,10 @@ def test_netbird_recipe_round_trip(tmp_path, real_tools):
     cfg = yaml.safe_load(plain)["server"]
     assert cfg["auth"]["issuer"] == "https://netbird.veronoi.cc/oauth2"  # embedded IdP stays: no startup dependency on Authentik
     assert cfg["auth"].get("localAuthDisabled", False) is False  # local login = break-glass when Authentik or the mesh is down
-    assert cfg["reverseProxy"]["trustedHTTPProxies"] == ["172.30.0.0/24"]
+    # trustedPeers, not trustedHTTPProxies: with the latter the gateway 172.30.0.1 (ecstasy hairpinned to its own public IP) is
+    # skipped as a "proxy" and the dashboard shows Traefik's container IP 172.30.0.2 (README.md).
+    assert cfg["reverseProxy"]["trustedPeers"] == ["172.30.0.0/24"]
+    assert "trustedHTTPProxies" not in cfg["reverseProxy"]
     assert cfg["store"]["engine"] == "sqlite" and len(cfg["store"]["encryptionKey"]) >= 32
     assert "connectors" not in cfg["auth"]  # 0.82.1 cannot declare connectors in config.yaml (README.md: dashboard step)
 
