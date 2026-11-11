@@ -1,6 +1,8 @@
 # Traefik routes for netbird.veronoi.cc (loaded by apps/traefik, see its README). Synced by apps-sync; no secrets here.
 # Paths per https://docs.netbird.io/selfhosted/external-reverse-proxy (combined container).
-# The optional NetBird Proxy feature (its separate gRPC service) is intentionally not routed.
+# The NetBird reverse proxy (netbird-proxy) terminates its own TLS: a TCP router passes proxy.veronoi.cc and its subdomains
+# through untouched (PROXY protocol v2 keeps the client IP). Deliberately no wildcard-SNI catch-all: TCP routers win over HTTP routers on the
+# same entrypoint, so a catch-all would swallow netbird.veronoi.cc and auth.veronoi.cc.
 http:
   routers:
     netbird-grpc:
@@ -38,3 +40,21 @@ http:
       loadBalancer:
         servers:
           - url: http://netbird-dashboard:80
+tcp:
+  routers:
+    netbird-proxy:
+      rule: HostSNI(`proxy.veronoi.cc`) || HostSNIRegexp(`^[a-z0-9-]+\.proxy\.veronoi\.cc$`)
+      entryPoints: [websecure]
+      tls:
+        passthrough: true
+      service: netbird-proxy
+  services:
+    netbird-proxy:
+      loadBalancer:
+        servers:
+          - address: netbird-proxy:8443
+        serversTransport: netbird-proxy-pp2
+  serversTransports:
+    netbird-proxy-pp2:
+      proxyProtocol:
+        version: 2

@@ -1,0 +1,5 @@
+# apps-sync: keep
+# NetBird reverse proxy: ACME account and issued certificates (Let's Encrypt rate limits make re-issuing on every reset costly).
+# Persistent: `apps-sync reset netbird` keeps it, only `apps-sync reset --include-persistent netbird` removes it.
+[Volume]
+VolumeName=netbird-proxy-certs

@@ -12,10 +12,13 @@ The NetBird **client** on the node is not an app, it is baked into the Ignition 
 | `netbird-server.container` | apps-sync | `netbirdio/netbird-server`: management, signal, relay, STUN and the embedded Dex IdP in one container. Publishes only `3478/udp`. |
 | `netbird-dashboard.container`, `dashboard.env` | apps-sync | Web UI, not published. `dashboard.env` is plain (no secrets). |
 | `routes.yml` | apps-sync | Traefik routes (gRPC h2c, WebSocket/relay, API, OAuth2, dashboard) for `netbird.veronoi.cc`, loaded by `apps/traefik`. |
+| `netbird-proxy.container`, `proxy.env` | apps-sync | [Reverse Proxy](#reverse-proxy-netbird-proxy) (`netbirdio/reverse-proxy`, same version as the server). `proxy.env` is plain (no secrets). Publishes nothing. |
+| `netbird-proxy-certs.volume` | apps-sync | Named volume with the proxy's ACME account and certificates. Persistent. |
 | `netbird-data.volume` | apps-sync | Named volume with the NetBird database. Persistent. |
 | `/var/data/netbird-server/config.yaml` | secrets-sync | The server config with all secrets, from `secrets/ecstasy/netbird-server.yaml.sops` (0600 root). |
+| `/var/data/secrets/netbird-proxy.env` | secrets-sync | The proxy access token `NB_PROXY_TOKEN`, from `secrets/ecstasy/netbird-proxy.env.sops` (0600 root). |
 
-Both containers join `traefik.network` (defined by `apps/traefik`), so `apps: [traefik, netbird]` must both be in `nodes/ecstasy.yml`. The
+All containers join `traefik.network` (defined by `apps/traefik`), so `apps: [traefik, netbird]` must both be in `nodes/ecstasy.yml`. The
 host path `/var/data/netbird-server/` is deliberately not `/var/data/netbird/`: that directory belongs to the baked NetBird *client*, as do
 the unit names `netbird.container` and the container name `netbird` (Quadlet unit names are global; a test guards this).
 
@@ -24,10 +27,10 @@ a reinstall that keeps `data`.
 
 ## Gating
 
-Both containers have `ConditionPathExists=/var/data/netbird-server/config.yaml`. Before the first `secrets-sync` render the units are
+The server and the dashboard have `ConditionPathExists=/var/data/netbird-server/config.yaml`. Before the first `secrets-sync` render the units are
 skipped instead of crash-looping. The `secrets-sync` manifest line lists both units, so when the file appears (or its content changes)
-they are (re)started together. Traefik is not gated: it already knows the route and requests the certificate, the backend answers `502`
-until the units are up.
+they are (re)started together. `netbird-proxy` has the same kind of gate on `/var/data/secrets/netbird-proxy.env` (its own manifest line).
+Traefik is not gated: it already knows the route and requests the certificate, the backend answers `502` until the units are up.
 
 ## Needs a reinstall (once)
 
@@ -205,6 +208,93 @@ What happens to the old embedded-IdP login: with `localAuthDisabled: true` the `
 local users stay in the database but cannot sign in; the dashboard's own OIDC client (`netbird-dashboard`, issuer
 `https://netbird.veronoi.cc/oauth2`) is unchanged.
 
+## Reverse Proxy (`netbird-proxy`)
+
+NetBird's [Reverse Proxy](https://docs.netbird.io/manage/reverse-proxy) publishes a service that sits behind a NetBird peer (for example
+Authentik on coke) under `<name>.proxy.veronoi.cc`, with TLS, optional SSO/password/PIN and IP/country rules. The `netbird-proxy`
+container is the public endpoint and runs its own embedded WireGuard client to reach the peers. Setup follows the
+[migration guide](https://docs.netbird.io/selfhosted/migration/enable-reverse-proxy) (combined container variant).
+
+- **Traffic path:** Traefik (`routes.yml`, TCP router, TLS passthrough) -> `netbird-proxy:8443`. The proxy obtains its own Let's Encrypt
+  certificates (`tls-alpn-01` on 443, so Traefik must not terminate TLS for these names). Traefik sends PROXY protocol v2 (`serversTransport`
+  `netbird-proxy-pp2`), the proxy trusts it only from `172.30.0.0/24` (`NB_PROXY_TRUSTED_PROXIES`, same subnet as `apps/traefik/traefik.network`).
+- **Routing rule:** `HostSNI(`proxy.veronoi.cc`) || HostSNIRegexp(`^[a-z0-9-]+\.proxy\.veronoi\.cc$`)`. There is deliberately **no**
+  `HostSNI(`*`)` catch-all as in NetBird's docker-compose example: Traefik evaluates TCP routers before HTTP routers on the same entrypoint,
+  so a catch-all would take `netbird.veronoi.cc` and `auth.veronoi.cc` away from their HTTP routers (the docs' answer is a `!HostSNI(...)`
+  exclusion per HTTP host, which breaks silently with every new app). Matching only the proxy domain needs no maintenance.
+- **Management connection:** `http://netbird-server:80` over `traefik.network` (`NB_PROXY_ALLOW_INSECURE=true`: the traffic never leaves the
+  host), not through Traefik; the `ProxyService` gRPC therefore needs no Traefik route.
+- **Podman:** nothing special. No capabilities, no `/dev/net/tun`, no published port: the embedded client runs WireGuard in userspace and
+  reaches peers outbound (ICE/STUN plus the relay). Without a fixed `NB_PROXY_WG_PORT` + forwarded UDP port the connection to peers may be relayed
+  instead of direct (`netbird status -d` on a peer shows `Relayed`); that works, it is only slower. The proxy needs outbound internet (it
+  downloads a GeoLite2 database into its container on each start, and connects to Signal/relay at the public address `netbird.veronoi.cc`:
+  ecstasy must reach its own public IP, which it already does for its NetBird client).
+
+### DNS (your step, not in git)
+
+| Type | Name | Content |
+|---|---|---|
+| `A` | `proxy.veronoi.cc` | `176.65.149.212` |
+| `CNAME` | `*.proxy.veronoi.cc` | `proxy.veronoi.cc` |
+
+Both **DNS only** (grey cloud in Cloudflare): the proxy completes ACME on port 443 itself, and Cloudflare's proxy neither passes the
+`acme-tls/1` ALPN nor the PROXY protocol. Keep the AAAA records away here as well, as for `netbird.veronoi.cc`.
+
+### Token (once, after the server runs)
+
+The proxy authenticates with an access token that only the running server can create (`admin token create` writes into its database; it is
+shown once and only its hash is stored). So the order on a fresh install is: server up (config rendered, `netbird-server` active), **then**
+create the token, commit it, `secrets-sync` renders it and starts the proxy. Until then `netbird-proxy` is skipped by its gate. The recipe
+runs on your admin machine, fetches the token over SSH into a shell variable (`printf` is a builtin: the token never shows up in `ps`, in a
+file or on the terminal; a failed fetch stops before `sops`, which writes the file only when encryption worked):
+
+```
+t=$(ssh veronoicc@ecstasy.node.veronoi.cc 'sudo podman exec netbird-server /go/bin/netbird-server --config /etc/netbird/config.yaml admin token create --name ecstasy-proxy' |
+  python3 -c "import re,sys; print(re.search(r'nbx_[\w-]+', sys.stdin.read()).group(0))") &&
+  printf 'NB_PROXY_TOKEN=%s\n' "$t" |
+  sops --encrypt --filename-override secrets/ecstasy/netbird-proxy.env.sops \
+    --input-type dotenv --output-type dotenv --output secrets/ecstasy/netbird-proxy.env.sops /dev/stdin
+```
+
+Commit and push `secrets/ecstasy/netbird-proxy.env.sops` and `sudo systemctl start secrets-sync` on the node (or wait 15 min). List or
+revoke tokens with `... admin token list` / `... admin token revoke <token-id>` (same command prefix). A new token = rerun the recipe, push.
+A `database reset` (`apps-sync reset --include-persistent netbird`) invalidates the token (`invalid token` in the proxy log): rerun the recipe.
+
+### Check
+
+```
+ssh <host> systemctl status netbird-proxy
+ssh <host> sudo podman logs netbird-proxy        # "proxy main listener bound", "Initial mapping sync complete"
+ssh <host> sudo podman logs netbird-server | grep -i cluster   # proxy registered, cluster_addr: proxy.veronoi.cc
+```
+
+In the dashboard, **Reverse Proxy -> Services -> Add Service**: `proxy.veronoi.cc` is offered in the domain selector with a **Cluster** badge.
+An unknown name reaching the proxy (`TLS handshake error ... unknown domain "x.proxy.veronoi.cc"` in its log) proves the Traefik passthrough works.
+
+### Add a service (dashboard)
+
+1. Reverse Proxy -> Services -> Add Service, domain `proxy.veronoi.cc` (cluster), subdomain e.g. `auth2` -> `auth2.proxy.veronoi.cc`.
+2. Target: a NetBird peer (or a network resource) and its port, e.g. coke (`100.127.197.215`) port `9000` for Authentik. The peer must be
+   reachable by an access policy for the proxy's peer (the dashboard explains it when the target is added). Modes: HTTP (via 443), TLS,
+   and raw TCP/UDP (these need published ports on the proxy container and are **not** set up here; add `PublishPort=` to the Quadlet).
+3. Authentication (Access Control tab): none (public), **SSO** (NetBird login: users/groups of your accounts; the OIDC round trip runs
+   through this server's embedded IdP, so SSO depends on the login connector, i.e. **Authentik on coke being reachable**, as for the dashboard),
+   **password**, **PIN**, plus allow/deny rules by CIDR and country. Without any auth method the service is open to the internet.
+4. The certificate is requested when the service is created (status `certificate_pending`, then active). `certificate_failed` means
+   DNS or port 443 is wrong (see below); fix it, then edit/re-save the service, and if it stays failed `systemctl restart netbird-proxy`
+   (not verified here whether the proxy retries a failed order on its own).
+
+Not created by this repo: services live in NetBird's database (backed up with `netbird-data`), they are not declarative.
+
+### Failure modes
+
+- DNS missing, or proxied by Cloudflare (orange cloud): no certificate can be issued (`certificate_failed`), `curl` shows Cloudflare's
+  certificate. The proxy itself stays up; `netbird.veronoi.cc` and `auth.veronoi.cc` are unaffected (separate routers).
+- Token missing: `netbird-proxy` is skipped (gate). Token revoked/wrong: the proxy is refused by the server (`invalid token` per the NetBird docs); rerun the token recipe.
+- Server down: the proxy cannot sync new services until it is back (not verified whether existing ones keep serving); `Restart=on-failure` restarts it if it exits.
+- Authentik/coke down: services without SSO keep working, SSO services cannot log in.
+- Traefik down: everything on 443 is down, including this.
+
 ## Backup
 
 The state is the volume `netbird-data` (ACME state belongs to Traefik, see its README). Export it (as root; stop the server first for a
@@ -232,7 +322,7 @@ The installed version also does not recreate a changed network: stop the app's u
 
 ## Upgrade
 
-Images are pinned in the Quadlets (`netbird-server`, `dashboard`). Bump the tags in git; `apps-sync` restarts only the changed units.
+Images are pinned in the Quadlets (`netbird-server`, `netbird-proxy`, `dashboard`). Bump the tags in git, the proxy to the same version as the server (a test enforces it); `apps-sync` restarts only the changed units.
 Nothing uses `AutoUpdate`. A change to `dashboard.env` restarts the app's containers (apps-sync restarts all containers of an app when a
 plain file changes); a change to `routes.yml` reloads Traefik.
 

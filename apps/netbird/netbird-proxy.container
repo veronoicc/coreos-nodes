@@ -1,0 +1,25 @@
+[Unit]
+Description=NetBird reverse proxy (TLS passthrough from Traefik, own certificates)
+Wants=network-online.target
+After=network-online.target netbird-server.service
+RequiresMountsFor=/var/data
+# The access token is rendered by secrets-sync (secrets/ecstasy/netbird-proxy.env.sops) and can only be created once the server
+# runs (see README.md). Until then the unit is skipped; secrets-sync starts it when the file appears.
+ConditionPathExists=/var/data/secrets/netbird-proxy.env
+
+[Container]
+# Pinned to the server release (the proxy and management speak a gRPC API that is versioned together).
+Image=docker.io/netbirdio/reverse-proxy:0.82.1
+ContainerName=netbird-proxy
+# Reached by Traefik (TCP passthrough, routes.yml); management over the same network. Nothing is published.
+Network=traefik.network
+# Settings (plain, from git) and the token (NB_PROXY_TOKEN, sops).
+EnvironmentFile=/etc/containers/systemd/apps/netbird/proxy.env
+EnvironmentFile=/var/data/secrets/netbird-proxy.env
+Volume=netbird-proxy-certs.volume:/certs
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

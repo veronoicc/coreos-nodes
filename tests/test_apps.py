@@ -158,6 +158,9 @@ def test_images_pinned():
     img = {n: q["Container"]["Image"][0] for _, n, q in all_containers()}
     assert re.fullmatch(r"docker\.io/library/traefik:v3\.7\.(1[3-9]|[2-9]\d)", img["traefik"]), img["traefik"]  # >= 3.7.13
     assert re.fullmatch(r"docker\.io/netbirdio/netbird-server:\d+\.\d+\.\d+", img["netbird-server"])
+    # the reverse proxy and the management server speak a gRPC API that is versioned together
+    server = img["netbird-server"].rsplit(":", 1)[1]
+    assert img["netbird-proxy"] == f"docker.io/netbirdio/reverse-proxy:{server}"
     assert re.fullmatch(r"docker\.io/netbirdio/dashboard:v\d+\.\d+\.\d+", img["netbird-dashboard"])
     assert re.fullmatch(r"ghcr\.io/goauthentik/server:20\d\d\.\d+\.\d+", img["authentik-server"])
     assert img["authentik-server"] == img["authentik-worker"]
@@ -274,22 +277,60 @@ def test_netbird_routes():
     assert url("netbird-dashboard") == "http://netbird-dashboard:80"
 
 
+def test_netbird_proxy_tcp_route():
+    text = (APPS / "netbird" / "routes.yml").read_text()
+    tcp = load_routes(APPS / "netbird" / "routes.yml")["tcp"]
+    # TCP routers beat HTTP routers on the same entrypoint: a catch-all would take netbird/auth away from their HTTP routes
+    assert "HostSNI(`*`)" not in text
+    router = tcp["routers"]["netbird-proxy"]
+    assert router["entryPoints"] == ["websecure"] and router["tls"] == {"passthrough": True}
+    exact, pattern = re.fullmatch(r"HostSNI\(`([^`]+)`\) \|\| HostSNIRegexp\(`([^`]+)`\)", router["rule"]).groups()
+    matches = lambda host: host == exact or re.search(pattern, host)  # noqa: E731
+    assert exact == "proxy.veronoi.cc"
+    for host in ("proxy.veronoi.cc", "test.proxy.veronoi.cc", "my-app2.proxy.veronoi.cc"):
+        assert matches(host), host
+    for host in ("netbird.veronoi.cc", "auth.veronoi.cc", "veronoi.cc", "evilproxy.veronoi.cc", "a.proxy.veronoi.cc.evil.org"):
+        assert not matches(host), host
+    svc = tcp["services"][router["service"]]["loadBalancer"]
+    pp = tcp["serversTransports"][svc["serversTransport"]]["proxyProtocol"]
+    assert pp == {"version": 2}  # the proxy has NB_PROXY_PROXY_PROTOCOL=true
+    env = env_file(APPS / "netbird" / "proxy.env")
+    cname = containers("netbird")["netbird-proxy"]["Container"]["ContainerName"][0]
+    assert svc["servers"] == [{"address": f"{cname}:{env['NB_PROXY_ADDRESS'].lstrip(':')}"}]
+    assert env["NB_PROXY_DOMAIN"] == exact and router["rule"].count(exact.replace(".", r"\.")) == 1
+    # the proxy only believes PROXY protocol from Traefik's network
+    assert env["NB_PROXY_TRUSTED_PROXIES"] == parse_quadlet(APPS / "traefik" / "traefik.network")["Network"]["Subnet"][0]
+    assert env["NB_PROXY_PROXY_PROTOCOL"] == "true" and env["NB_PROXY_FORWARDED_PROTO"] == "https"
+    assert env["NB_PROXY_ACME_CHALLENGE_TYPE"] == "tls-alpn-01" and env["NB_PROXY_ALLOW_INSECURE"] == "true"
+    assert env["NB_PROXY_MANAGEMENT_ADDRESS"] == "http://netbird-server:80"  # internal, never through Traefik
+    assert not any("TOKEN" in k for k in env)  # the token is a sops secret
+
+
 # --------------------------------------------------------------- netbird
 
 
 def test_netbird_units():
     cs = containers("netbird")
-    assert set(cs) == {"netbird-server", "netbird-dashboard"}
+    assert set(cs) == {"netbird-server", "netbird-dashboard", "netbird-proxy"}
+    for name in ("netbird-server", "netbird-dashboard"):
+        assert cs[name]["Unit"]["ConditionPathExists"] == ["/var/data/netbird-server/config.yaml"]  # same gate for both
     for q in cs.values():
-        assert q["Unit"]["ConditionPathExists"] == ["/var/data/netbird-server/config.yaml"]  # same gate for both
         assert q["Container"]["Network"] == ["traefik.network"]
     s = cs["netbird-server"]["Container"]
     assert s["PublishPort"] == ["3478:3478/udp"]  # STUN cannot be proxied; everything else goes through Traefik
     assert "netbird-data.volume:/var/lib/netbird" in s["Volume"]
     assert "/var/data/netbird-server/config.yaml:/etc/netbird/config.yaml:ro,Z" in s["Volume"]
     assert "PublishPort" not in cs["netbird-dashboard"]["Container"]
+    p = cs["netbird-proxy"]
+    # gated on the rendered token; no published port, no capabilities, no devices (userspace WireGuard)
+    assert p["Unit"]["ConditionPathExists"] == ["/var/data/secrets/netbird-proxy.env"]
+    assert p["Container"]["EnvironmentFile"] == ["/etc/containers/systemd/apps/netbird/proxy.env", "/var/data/secrets/netbird-proxy.env"]
+    assert p["Container"]["Volume"] == ["netbird-proxy-certs.volume:/certs"]
+    assert not {"PublishPort", "AddCapability", "PodmanArgs", "AddDevice", "SecurityLabelDisable"} & set(p["Container"])
+    assert env_file(APPS / "netbird" / "proxy.env")["NB_PROXY_CERTIFICATE_DIRECTORY"] == "/certs"
     assert {p.name for p in (APPS / "netbird").iterdir()} == {
-        "netbird-server.container", "netbird-dashboard.container", "netbird-data.volume", "dashboard.env", "routes.yml", "README.md"}
+        "netbird-server.container", "netbird-dashboard.container", "netbird-proxy.container", "netbird-data.volume",
+        "netbird-proxy-certs.volume", "dashboard.env", "proxy.env", "routes.yml", "README.md"}
 
 
 def test_netbird_dashboard_env():
@@ -314,10 +355,12 @@ def test_secrets_sync_targets_match_the_units():
         assert (ROOT / "secrets" / node / "targets.conf").exists()
         for u in units:  # gate + file are the same path
             assert parse_quadlet(APPS / app / f"{u}.container")["Unit"]["ConditionPathExists"] == [dest]
-    # the baked client's setup key is rendered on both nodes
-    for node in NODES:
+    for node in NODES:  # the baked client's setup key is rendered on both nodes
         line = next(l for l in targets(node) if l[0] == "netbird.env.sops")
         assert line[1] == NB_SECRETS and line[4] == "netbird.service"
+    # the reverse proxy token: rendered where the proxy unit's gate and EnvironmentFile expect it, restarts only the proxy
+    line = next(l for l in targets("ecstasy") if l[0] == "netbird-proxy.env.sops")
+    assert line[1:] == ["/var/data/secrets/netbird-proxy.env", "0600", "root:root", "netbird-proxy.service"]
 
 
 # -------------------------------------------------------------- authentik
@@ -429,7 +472,7 @@ def readme_recipe(app, marker):
     raise AssertionError(f"no recipe starting with {marker!r} in apps/{app}/README.md")
 
 
-def run_recipe(recipe, tmp_path, real_tools, node, path):
+def run_recipe(recipe, tmp_path, real_tools, node, path, ssh_output=None, fail=False):
     admin = tmp_path / "admin.key"
     subprocess.run([real_tools.age_keygen, "-o", admin], check=True, capture_output=True)
     pub = subprocess.run([real_tools.age_keygen, "-y", admin], check=True, capture_output=True, text=True).stdout.strip()
@@ -439,8 +482,14 @@ def run_recipe(recipe, tmp_path, real_tools, node, path):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     (bindir / "sops").symlink_to(real_tools.sops)
+    if ssh_output is not None:  # stands in for the node: prints what the server CLI would
+        (bindir / "ssh").write_text(f"#!/bin/sh\ncat <<'EOF'\n{ssh_output}\nEOF\n")
+        (bindir / "ssh").chmod(0o755)
     env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}", "HOME": str(tmp_path), "SOPS_AGE_KEY_FILE": str(admin)}
     r = subprocess.run(["bash", "-c", recipe], cwd=work, capture_output=True, text=True, env=env)
+    if fail:
+        assert r.returncode != 0 and not (work / path).exists(), "a failed token fetch must not leave a secret file behind"
+        return r
     assert r.returncode == 0, r.stderr
     out = work / path
     fmt = "dotenv" if path.endswith("env.sops") else "yaml"
@@ -463,6 +512,20 @@ def test_authentik_recipe_round_trip(tmp_path, real_tools):
         assert v not in cipher
     # every key an Authentik unit or the blueprint needs is there
     assert {"AUTHENTIK_SECRET_KEY", "POSTGRES_PASSWORD", "AUTHENTIK_POSTGRESQL__PASSWORD"} <= set(env)
+
+
+def test_netbird_proxy_token_recipe_round_trip(tmp_path, real_tools):
+    token = "nbx_" + "aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5"  # 40 chars, as `admin token create` prints
+    output = f"Token created successfully!\nToken ID: dbqb7oj4s980086ugk00\nName: ecstasy-proxy\nToken: {token}\nSave it, it is shown once."
+    recipe = readme_recipe("netbird", "t=$(ssh veronoicc@")
+    assert "--name ecstasy-proxy" in recipe and "podman exec netbird-server" in recipe
+    work, cipher, plain = run_recipe(recipe, tmp_path, real_tools, "ecstasy", "secrets/ecstasy/netbird-proxy.env.sops", ssh_output=output)
+    assert plain.strip() == f"NB_PROXY_TOKEN={token}"  # the 20-char token ID is not picked up
+    assert token not in cipher and "NB_PROXY_TOKEN=ENC[" in cipher
+    (tmp_path / "fail").mkdir()
+    r = run_recipe(recipe, tmp_path / "fail", real_tools, "ecstasy", "secrets/ecstasy/netbird-proxy.env.sops",
+                   ssh_output="Error: server not running", fail=True)
+    assert "ENC[" not in r.stdout + r.stderr
 
 
 def test_netbird_recipe_round_trip(tmp_path, real_tools):
