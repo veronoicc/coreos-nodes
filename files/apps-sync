@@ -5,12 +5,17 @@
 # README* files in an app dir are documentation: never deployed (a copy an older apps-sync left behind is removed
 # quietly, without daemon-reload or restart). A .volume file with the comment line "# apps-sync: keep" is persistent:
 # reset keeps that volume unless --include-persistent is given.
-# Env: APPS_REPO_URL, APPS_BRANCH (from /etc/apps-sync.env on the node),
+# Env: APPS_REPO_URL, APPS_BRANCH, APPS_LIST (space separated apps this node runs; from /etc/apps-sync.env on the node),
 #      APPS_SRC_DIR (local repo root instead of downloading; for tests),
 #      APPS_DIR (managed dir), APPS_LOCK (lock file).
+# Only apps in APPS_LIST are deployed. A deployed app that is not listed (or not in the repo) is stopped and removed
+# like a removed app (volumes are never deleted). Empty or unset APPS_LIST = this node runs no apps.
+# A deployed or removed *.yml|*.yaml|*.toml file (Traefik route files) triggers `systemctl reload traefik.service` after the
+# restarts: Traefik's directory watcher does not see changes in subdirectories. A failing or missing reload is ignored.
 set -euo pipefail
 
 APPS_DIR=${APPS_DIR:-/etc/containers/systemd/apps}
+APPS_LIST=${APPS_LIST:-}
 APPS_LOCK=${APPS_LOCK:-/run/apps-sync.lock}
 APPS_BRANCH=${APPS_BRANCH:-main}
 
@@ -58,6 +63,11 @@ setting() { sed -n "s/^$2=//p" "$1" | head -n1; }
 # Per-run state.
 declare -a CHANGED=() # "<app>/<file>" copied or updated
 REMOVED=0
+ROUTES=0 # a route file (.yml/.yaml/.toml) was deployed, updated or removed
+
+note_route() {
+    case ${1##*.} in yml | yaml | toml) ROUTES=1 ;; esac
+}
 
 fetch() {
     local work=$1
@@ -84,12 +94,22 @@ deploy() {
             if ! cmp -s "$f" "$dest"; then
                 install -D -m 0644 "$f" "$dest"
                 CHANGED+=("$app/${f##*/}")
+                note_route "$f"
             fi
         done
     done
 }
 
-# prune: remove managed files whose repo counterpart vanished, stop their units.
+# wanted <app>: the node runs it (listed) and the repo has it.
+wanted() {
+    local a
+    for a in $APPS_LIST; do
+        [ "$a" = "$1" ] && [ -d "$SRC/apps/$1" ] && return 0
+    done
+    return 1
+}
+
+# prune: remove managed files whose repo counterpart vanished or whose app is not wanted, stop their units.
 prune() {
     local d f app name unit
     [ -d "$APPS_DIR" ] || return 0
@@ -103,10 +123,11 @@ prune() {
                 rm -f "$f"
                 continue
             fi
-            [ -f "$SRC/apps/$app/$name" ] && continue
+            ! wanted "$app" || [ ! -f "$SRC/apps/$app/$name" ] || continue
             unit=$(unit_of "$name")
             [ -z "$unit" ] || systemctl stop "$unit" || true
             rm -f "$f"
+            note_route "$name"
             REMOVED=1
         done
         rmdir "$d" 2> /dev/null || true
@@ -134,8 +155,8 @@ reconcile() {
     local app unit
     [ -d "$SRC/apps" ] || die "no apps/ directory in the repo, refusing to reconcile"
     local -a apps=()
-    for app in "$SRC/apps"/*/; do
-        [ -d "$app" ] && apps+=("$(basename "$app")")
+    for app in $APPS_LIST; do
+        if [ -d "$SRC/apps/$app" ]; then apps+=("$app"); else echo "apps-sync: listed app '$app' is not in the repo" >&2; fi
     done
     if [ "${#apps[@]}" -gt 0 ]; then deploy "${apps[@]}"; fi
     prune
@@ -146,6 +167,7 @@ reconcile() {
             systemctl restart "$unit"
         done < <(units_to_restart)
     fi
+    if [ "$ROUTES" -eq 1 ]; then systemctl reload traefik.service || true; fi
 }
 
 # ranked_files <dir> <sort flags>: regular files of an app dir ordered by rank.
@@ -158,6 +180,7 @@ ranked_files() {
 
 reset() {
     local app=$1 include=$2 dir name unit f
+    [[ " $APPS_LIST " == *" $app "* ]] || die "app '$app' is not in APPS_LIST"
     dir=$SRC/apps/$app
     [ -d "$dir" ] || die "no app '$app' in the repo"
     # Stop containers first, then volumes/networks.

@@ -49,6 +49,7 @@ class Env:
         }
         if use_src:
             env["APPS_SRC_DIR"] = str(self.src)
+        env.setdefault("APPS_LIST", "whoami db")
         env.update(extra_env or {})
         self.log.write_text("")
         r = subprocess.run(["bash", str(SCRIPT), *args], env=env, capture_output=True, text=True)
@@ -349,3 +350,101 @@ def test_reset_ignores_readme(env):
     env.run()
     env.run("reset", "db")
     assert not any("README" in c or "readme" in c for c in env.calls())
+
+
+# ---- per-node app list (APPS_LIST)
+
+
+def test_only_listed_apps_are_deployed(env):
+    env.run(extra_env={"APPS_LIST": "db"})
+    assert (env.apps / "db" / "db.container").exists()
+    assert not (env.apps / "whoami").exists()
+    assert env.restarted() == {"db.service", "dbdata-volume.service"}
+
+
+def test_app_dropping_out_of_list_is_stopped_and_removed_volumes_kept(env):
+    env.put("db/dbdata.volume", KEEP + DB_VOLUME)
+    env.put("db/README.md", "docs\n")
+    env.run()
+    env.run(extra_env={"APPS_LIST": "whoami"})
+    assert not (env.apps / "db").exists()
+    assert (env.apps / "whoami" / "whoami.container").exists()
+    calls = env.calls()
+    assert "systemctl stop db.service" in calls and "systemctl stop dbdata-volume.service" in calls
+    assert not any(c.startswith("podman") for c in calls)
+    assert calls.index("systemctl stop db.service") < calls.index("systemctl daemon-reload")
+    assert env.restarted() == set()
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_empty_list_deploys_nothing_and_removes_deployed(env, value):
+    env.run()
+    env.run(extra_env={"APPS_LIST": value})
+    assert not (env.apps / "db").exists() and not (env.apps / "whoami").exists()
+    assert "systemctl stop db.service" in env.calls()
+    assert not any(c.startswith("podman") for c in env.calls())
+
+
+def test_unset_list_deploys_nothing(env):
+    e = {k: v for k, v in os.environ.items() if k != "APPS_LIST"}
+    e.update(PATH=f"{env.bin}:{e['PATH']}", APPS_DIR=str(env.apps), APPS_LOCK=str(env.tmp / "lock"),
+             APPS_SRC_DIR=str(env.src))
+    r = subprocess.run(["bash", str(SCRIPT)], env=e, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert not env.apps.exists() or not any(env.apps.iterdir())
+
+
+def test_listed_app_missing_from_repo_is_not_deployed(env):
+    env.run(extra_env={"APPS_LIST": "db ghost"})
+    assert (env.apps / "db" / "db.container").exists() and not (env.apps / "ghost").exists()
+
+
+def test_reset_refuses_unlisted_app(env):
+    r = env.run("reset", "db", extra_env={"APPS_LIST": "whoami"}, check=False)
+    assert r.returncode != 0 and "db" in r.stderr and "APPS_LIST" in r.stderr
+    assert not any(c.startswith("podman") for c in env.calls())
+
+
+# ---- Traefik's directory watcher misses route files in subdirs: reload it after yml/yaml/toml changes
+
+ROUTE = "http:\n  routers: {}\n"
+
+
+@pytest.mark.parametrize("name", ["route.yml", "route.yaml", "route.toml"])
+def test_route_file_change_reloads_traefik_after_restarts(env, name):
+    env.run()
+    env.put(f"db/{name}", ROUTE)
+    env.run()
+    calls = env.calls()
+    assert calls.count("systemctl reload traefik.service") == 1
+    assert calls.index("systemctl restart db.service") < calls.index("systemctl reload traefik.service")
+
+
+def test_removed_route_file_reloads_traefik(env):
+    env.put("db/route.yml", ROUTE)
+    env.run()
+    env.drop("db/route.yml")
+    env.run()
+    assert "systemctl reload traefik.service" in env.calls()
+
+
+def test_removed_app_with_route_file_reloads_traefik(env):
+    env.put("db/route.yml", ROUTE)
+    env.run()
+    env.run(extra_env={"APPS_LIST": "whoami"})
+    assert "systemctl reload traefik.service" in env.calls()
+
+
+def test_no_reload_without_route_changes(env):
+    env.run()
+    env.put("db/db.env", "A=2\n")
+    env.run()
+    assert not any("reload traefik" in c for c in env.calls())
+
+
+def test_reload_failure_is_ignored(env):
+    (env.bin / "systemctl").write_text(
+        f'#!/bin/sh\necho "systemctl $*" >> "{env.log}"\n[ "$1" = reload ] && exit 5\nexit 0\n'
+    )
+    env.put("db/route.yml", ROUTE)
+    env.run()

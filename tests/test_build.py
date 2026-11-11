@@ -163,6 +163,42 @@ def test_apps_sync_is_baked_in(ign):
     assert "OnBootSec=" in units["apps-sync.timer"]["contents"]
 
 
+@pytest.fixture
+def app_root(tmp_path):
+    (tmp_path / "files").symlink_to(ROOT / "files")
+    for a in ("traefik", "netbird"):
+        (tmp_path / "apps" / a).mkdir(parents=True)
+    return tmp_path
+
+
+def apps_env(app_root, node):
+    ign = json.loads(build.run_butane(build.to_yaml(build.render(base_config(), "ecstasy", node, app_root))))
+    return ign_file(ign, "/etc/apps-sync.env").splitlines()
+
+
+def test_apps_list_in_env_file_in_node_order(app_root):
+    assert 'APPS_LIST="traefik netbird"' in apps_env(app_root, base_node(apps=["traefik", "netbird"]))
+
+
+@pytest.mark.parametrize("node", [base_node(), base_node(apps=[]), base_node(apps=None)])
+def test_missing_or_empty_apps_means_empty_list(app_root, node):
+    assert 'APPS_LIST=""' in apps_env(app_root, node)
+
+
+@pytest.mark.parametrize(
+    "apps",
+    [["ghost"], ["traefik", "traefik"], ["Traefik"], ["../x"], ["a b"], [""], "traefik", [1]],
+)
+def test_bad_apps_rejected(app_root, apps):
+    with pytest.raises(build.ConfigError, match="apps"):
+        build.render(base_config(), "ecstasy", base_node(apps=apps), app_root)
+
+
+def test_repo_nodes_list_only_existing_apps():
+    for n in build.list_nodes():
+        build.render(build.load_yaml(ROOT / "config.yml"), n, build.load_node(n), ROOT)
+
+
 def test_secrets_sync_is_baked_in(ign):
     files = {f["path"]: f for f in ign["storage"]["files"]}
     assert files["/usr/local/bin/secrets-sync"]["mode"] == 0o755

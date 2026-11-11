@@ -9,6 +9,7 @@ check it with ignition-validate (both via containers).
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -223,6 +224,24 @@ WantedBy=multi-user.target
 """
 
 
+APP_NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+def node_apps(name, node, root):
+    """Validated `apps:` list of a node (missing/empty = no apps)."""
+    apps = node.get("apps") or []
+    if not isinstance(apps, list):
+        raise ConfigError(f"{name}: apps must be a list of app names")
+    for a in apps:
+        if not isinstance(a, str) or not APP_NAME.fullmatch(a):
+            raise ConfigError(f"{name}: invalid app name {a!r} in apps (lowercase letters, digits, '-')")
+        if not (Path(root) / "apps" / a).is_dir():
+            raise ConfigError(f"{name}: unknown app {a!r} in apps: no apps/{a}/ in the repo")
+    if len(set(apps)) != len(apps):
+        raise ConfigError(f"{name}: duplicate app in apps: {apps}")
+    return apps
+
+
 def render(config, name, node, root=ROOT):
     """Butane config (as a dict) for one node."""
     cfg = load_config_dict(config)
@@ -284,7 +303,8 @@ def render(config, name, node, root=ROOT):
                 inline_file("/usr/local/bin/secrets-sync", (files / "secrets-sync").read_text(), 0o755),
                 inline_file(
                     "/etc/apps-sync.env",
-                    f"APPS_REPO_URL={cfg['repo_url']}\nAPPS_BRANCH={cfg['branch']}\n",
+                    f"APPS_REPO_URL={cfg['repo_url']}\nAPPS_BRANCH={cfg['branch']}\n"
+                    f'APPS_LIST="{" ".join(node_apps(name, node, root))}"\n',
                 ),
                 inline_file("/etc/containers/systemd/netbird.container", netbird_quadlet(hostname)),
                 inline_file(
