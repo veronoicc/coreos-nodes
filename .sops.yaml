@@ -3,3 +3,7 @@ creation_rules:
     age: >-
       age16npdq708k84a7rp2u8ewgwmqeaw8hfvza49dxely68swnparleys3nn9eq,
       age1kcdthm2wx998cm80huuryxnj5qx28wsfahdlvs6qd5zg6plvg4jqn932ys
+  - path_regex: secrets/coke/.*
+    age: >-
+      age16npdq708k84a7rp2u8ewgwmqeaw8hfvza49dxely68swnparleys3nn9eq,
+      age17dqt7kkxzqpv806pkzfx0lmc83tw0dwzfcl09grdc6crkdv6radsyua7na
