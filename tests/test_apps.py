@@ -430,6 +430,10 @@ def test_authentik_is_published_on_the_mesh_address_only():
     route = load_routes(APPS / "authentik-route" / "routes.yml")["http"]
     assert route["services"]["authentik"]["loadBalancer"]["servers"] == [{"url": f"http://{ip}:9000"}]
     assert route["routers"]["authentik"]["rule"] == "Host(`auth.veronoi.cc`)"
+    # transition: the service-zone name routes to the same backend; the old name stays until NetBird's issuer moves
+    assert route["routers"]["authentik-service"]["rule"] == "Host(`auth.service.veronoi.cc`)"
+    assert route["routers"]["authentik-service"]["entryPoints"] == ["websecure", "mesh"]
+    assert route["routers"]["authentik-service"]["service"] == route["routers"]["authentik"]["service"] == "authentik"
     # boot ordering: the client creates the mesh interface; retry forever until it exists
     u = parse_quadlet(APPS / "authentik" / "authentik-server.container")
     assert "netbird.service" in u["Unit"]["After"][0].split() and "netbird.service" in u["Unit"]["Wants"][0].split()
