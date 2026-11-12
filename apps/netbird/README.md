@@ -178,6 +178,7 @@ connector, and the local login is switched off**:
   the issuer) when someone clicks its login button. The OIDC discovery runs with a 30 s dial and 10 s TLS timeout, so with Authentik
   blackholed the server may need up to about a minute longer to start, but it starts. The QEMU smoke asserts it (`tests/test_smoke_qemu.py`:
   server up, dashboard `200`, `/api` `401`, embedded issuer discovery, with an Authentik connector configured and unreachable).
+  The harness was adapted to the service-domain, mesh-entrypoint and secrets changes and has not run since: re-run it before relying on this claim.
 - Adding the connector while Authentik is down is accepted (the connector is stored, not contacted); logging in with it fails until
   Authentik answers. That is why the order matters only for convenience: do it after Authentik runs.
 

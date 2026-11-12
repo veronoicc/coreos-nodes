@@ -375,6 +375,9 @@ SMOKE_QCOW2=/path/to/fedora-coreos-*-qemu.x86_64.qcow2 .venv/bin/python -m pytes
 SMOKE_STOCK_ISO=$(ls build/iso-cache/*.iso) .venv/bin/python -m pytest tests/test_iso_reinstall_qemu.py
 ```
 
+The smoke harness was adapted to the Traefik mesh/public addresses, `traefik.env`, the Paperless apps and the repo-driven app lists (ecstasy
+gets `100.127.17.6` and `176.65.149.212` on its mesh NIC); it has not run since, so re-run it before relying on what it claims.
+
 `REPO_URL` (env) overrides `repo_url` in `config.yml`; the build fails if neither is set.
 
 ## One-time GitHub setup
