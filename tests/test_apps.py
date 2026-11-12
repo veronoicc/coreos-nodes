@@ -525,7 +525,8 @@ def test_authentik_blueprint():
     assert not isinstance(provider["signing_key"], str) and provider["signing_key"].tag == "Find"  # RS256 key: Dex verifies via JWKS
     # the redirect URIs are NetBird's embedded Dex callback and logout callback, strict
     assert {(r["matching_mode"], r["url"]) for r in provider["redirect_uris"]} == {
-        ("strict", "https://netbird.veronoi.cc/oauth2/callback"), ("strict", "https://netbird.veronoi.cc/oauth2/logout/callback")}
+        ("strict", "https://netbird.veronoi.cc/oauth2/callback"), ("strict", "https://netbird.veronoi.cc/oauth2/logout/callback"),
+        ("strict", "https://netbird.service.veronoi.cc/oauth2/callback"), ("strict", "https://netbird.service.veronoi.cc/oauth2/logout/callback")}
     assert app["identifiers"] == {"slug": "netbird"} and app["attrs"]["provider"].tag == "KeyOf"
     # every !Env variable is in the encrypted env file (README recipe) and in the worker's EnvironmentFile
     envs = {n.value for n in walk(doc) if isinstance(n, _Tag) and n.tag == "Env"}
