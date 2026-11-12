@@ -1,4 +1,4 @@
-"""The apps under apps/ (traefik, netbird, authentik, paperless) are declarative: lint the repo files.
+"""The apps under apps/ (traefik, netbird, authentik, paperless, monitoring) are declarative: lint the repo files.
 
 Everything here runs without a VM. tests/test_smoke_qemu.py boots the real thing."""
 import ipaddress
@@ -69,8 +69,8 @@ def targets(node):
 
 
 def test_apps_and_node_lists():
-    assert {p.name for p in APPS.iterdir()} == {"traefik", "netbird", "authentik", "paperless"}
-    assert NODES == {"ecstasy": ["traefik", "netbird"], "coke": ["authentik", "paperless"]}
+    assert {p.name for p in APPS.iterdir()} == {"traefik", "netbird", "authentik", "paperless", "monitoring"}
+    assert NODES == {"ecstasy": ["traefik", "netbird"], "coke": ["authentik", "paperless", "monitoring"]}
     assert not (ROOT / "tests" / "test_netbird_backend.py").exists()
 
 
@@ -170,6 +170,8 @@ def test_images_pinned():
     assert re.fullmatch(r"docker\.io/library/postgres:\d+\.\d+-alpine", img["authentik-postgres"])
     assert re.fullmatch(r"ghcr\.io/paperless-ngx/paperless-ngx:\d+\.\d+\.\d+", img["paperless"])
     assert re.fullmatch(r"docker\.io/valkey/valkey:\d+-alpine", img["paperless-valkey"])
+    assert re.fullmatch(r"docker\.io/timescale/timescaledb:\d+\.\d+\.\d+-pg17", img["timescaledb"])
+    assert re.fullmatch(r"docker\.io/grafana/grafana:\d+\.\d+\.\d+", img["grafana"])
 
 
 @pytest.mark.parametrize("vol", sorted(p for a in NODES_ALL for p in (APPS / a).glob("*.volume")), ids=lambda p: p.name)
@@ -560,6 +562,38 @@ def test_paperless_blueprint():
     assert (dest, mode, owner, restart) == ("/var/data/secrets/authentik-paperless.env", "0600", "root:root", "authentik-worker.service")
 
 
+def test_grafana_blueprint():
+    doc = load_blueprint(APPS / "authentik" / "grafana-blueprint.yaml")
+    assert doc["version"] == 1
+    provider = next(e for e in doc["entries"] if e["model"] == "authentik_providers_oauth2.oauth2provider")["attrs"]
+    app = next(e for e in doc["entries"] if e["model"] == "authentik_core.application")
+    binding = next(e for e in doc["entries"] if e["model"] == "authentik_policies.policybinding")
+    assert provider["client_type"] == "confidential"
+    assert provider["client_id"] == env_file(APPS / "monitoring" / "settings.env")["GF_AUTH_GENERIC_OAUTH_CLIENT_ID"] == "grafana"
+    assert set(provider["grant_types"]) == {"authorization_code", "refresh_token"}
+    assert isinstance(provider["client_secret"], _Tag) and provider["client_secret"].tag == "Env"
+    assert provider["client_secret"].value == "AUTHENTIK_GRAFANA_CLIENT_SECRET"
+    assert not isinstance(provider["signing_key"], str) and provider["signing_key"].tag == "Find"
+    # Grafana's callback is /login/generic_oauth (pkg/api/api.go: r.Get("/login/:name", ...)), strict match
+    assert provider["redirect_uris"] == [{"matching_mode": "strict", "url": "https://grafana.service.veronoi.cc/login/generic_oauth"}]
+    # the profile scope carries preferred_username and the groups claim the role mapping reads
+    assert [m.value[1] for m in provider["property_mappings"]] == [
+        ["managed", f"goauthentik.io/providers/oauth2/scope-{s}"] for s in ("openid", "email", "profile")]
+    assert app["identifiers"] == {"slug": "grafana"} and app["attrs"]["provider"].tag == "KeyOf"
+    assert app["attrs"]["meta_launch_url"] == env_file(APPS / "monitoring" / "settings.env")["GF_SERVER_ROOT_URL"]
+    assert binding["identifiers"]["target"].value == ["authentik_core.application", ["slug", "grafana"]]
+    assert binding["attrs"]["group"].value == ["authentik_core.group", ["name", "authentik Admins"]]
+    envs = {n.value for n in walk(doc) if isinstance(n, _Tag) and n.tag == "Env"}
+    assert envs == {"AUTHENTIK_GRAFANA_CLIENT_SECRET"}
+    worker = parse_quadlet(APPS / "authentik" / "authentik-worker.container")
+    assert "grafana-blueprint.yaml:/blueprints/custom/grafana.yaml:ro,z" in "".join(worker["Container"]["Volume"])
+    assert "/var/data/secrets/authentik-grafana.env" in worker["Container"]["EnvironmentFile"]
+    assert "/var/data/secrets/authentik-grafana.env" in worker["Unit"]["ConditionPathExists"]
+    assert "AUTHENTIK_GRAFANA" not in (APPS / "authentik" / "authentik-server.container").read_text()
+    file, dest, mode, owner, restart = next(l for l in targets("coke") if l[0] == "authentik-grafana.env.sops")
+    assert (dest, mode, owner, restart) == ("/var/data/secrets/authentik-grafana.env", "0600", "root:root", "authentik-worker.service")
+
+
 def walk(node):
     yield node
     if isinstance(node, dict):
@@ -635,6 +669,121 @@ def test_paperless_settings():
     assert {env[k] for k in ("PAPERLESS_DISABLE_REGULAR_LOGIN", "PAPERLESS_REDIRECT_LOGIN_TO_SSO", "PAPERLESS_SOCIAL_AUTO_SIGNUP")} == {"true"}
     assert env["PAPERLESS_ACCOUNT_ALLOW_SIGNUPS"] == "false"
     assert env["PAPERLESS_LOGOUT_REDIRECT_URL"] == "https://auth.service.veronoi.cc/application/o/paperless/end-session/"
+
+
+# -------------------------------------------------------------- monitoring
+
+GRAFANA_HOST = "grafana.service.veronoi.cc"
+# What an anonymous viewer needs for a public dashboard (grafana v13.3.1, see apps/monitoring/routes.yml for file:line)
+GRAFANA_PUBLIC_PREFIXES = ["/public-dashboards/", "/api/public/dashboards/", "/public/"]
+
+
+def test_monitoring_is_published_on_the_mesh_address_only():
+    cs = containers("monitoring")
+    assert set(cs) == {"timescaledb", "grafana"}
+    for name, port in (("timescaledb", "5432"), ("grafana", "3000")):
+        u = cs[name]
+        publish = u["Container"]["PublishPort"]
+        assert len(publish) == 1, publish
+        ip, host_port, container_port = publish[0].split(":")
+        assert ipaddress.ip_address(ip) in MESH and ip == "100.127.197.215", f"{ip} must be coke's mesh address, never 0.0.0.0"
+        assert (host_port, container_port) == (port, port)
+        assert "netbird.service" in u["Unit"]["After"][0].split() and "netbird.service" in u["Unit"]["Wants"][0].split()
+        assert u["Unit"]["StartLimitIntervalSec"] == ["0"] and u["Service"]["Restart"] == ["on-failure"]
+        assert u["Container"]["Network"] == ["monitoring.network"]
+
+
+def test_monitoring_units_gated_on_the_rendered_secrets():
+    dest = "/var/data/secrets/monitoring.env"
+    file, d, mode, owner, restart = next(l for l in targets("coke") if l[0] == "monitoring.env.sops")
+    assert (d, mode, owner) == (dest, "0600", "root:root")
+    assert set(restart.split(",")) == {"timescaledb.service", "grafana.service"}
+    for name, q in containers("monitoring").items():
+        assert q["Unit"]["ConditionPathExists"] == [dest], name
+        assert dest in q["Container"]["EnvironmentFile"], name
+
+
+def test_monitoring_timescaledb_unit():
+    c = containers("monitoring")["timescaledb"]["Container"]
+    assert c["Volume"] == [
+        "timescaledb-data.volume:/var/lib/postgresql/data",
+        "/etc/containers/systemd/apps/monitoring/init-grafana-role.sh:/docker-entrypoint-initdb.d/10-grafana-role.sh:ro,z"]
+    assert sorted(c["Environment"]) == ["POSTGRES_DB=monitoring", "POSTGRES_USER=admin"]
+    script = (APPS / "monitoring" / "init-grafana-role.sh").read_text()
+    # read-only role: connect, schema usage, select on current and future tables; the password comes from the env, not the file
+    for needle in ("GRAFANA_DB_PASSWORD", "CREATE ROLE grafana", "GRANT CONNECT ON DATABASE", "GRANT USAGE ON SCHEMA public",
+                   "GRANT SELECT ON ALL TABLES IN SCHEMA public", "ALTER DEFAULT PRIVILEGES", "GRANT SELECT ON TABLES TO grafana",
+                   "default_transaction_read_only"):
+        assert needle in script, needle
+    assert not re.search(r"(?i)\bgrant\s+(all|insert|update|delete|create)\b", script)
+    vol = APPS / "monitoring" / "timescaledb-data.volume"
+    assert parse_quadlet(vol)["Volume"]["VolumeName"] == ["timescaledb-data"]
+
+
+def test_monitoring_grafana_unit_and_datasource():
+    c = containers("monitoring")["grafana"]["Container"]
+    assert c["EnvironmentFile"] == ["/etc/containers/systemd/apps/monitoring/settings.env", "/var/data/secrets/monitoring.env"]
+    assert sorted(c["Volume"]) == [
+        "/etc/containers/systemd/apps/monitoring/datasource-timescaledb.yaml:/etc/grafana/provisioning/datasources/timescaledb.yaml:ro,z",
+        "grafana-data.volume:/var/lib/grafana"]
+    ds = yaml.safe_load((APPS / "monitoring" / "datasource-timescaledb.yaml").read_text())
+    assert ds["apiVersion"] == 1 and len(ds["datasources"]) == 1
+    d = ds["datasources"][0]
+    assert d["type"] == "postgres" and d["user"] == "grafana" and d["access"] == "proxy"
+    assert d["url"] == "timescaledb:5432"  # container name on monitoring.network
+    assert d["secureJsonData"] == {"password": "$__env{GRAFANA_DB_PASSWORD}"}
+    assert d["jsonData"]["timescaledb"] is True and d["jsonData"]["database"] == "monitoring"
+    assert d["jsonData"]["sslmode"] == "disable"  # private container network
+    assert d["editable"] is False
+
+
+def test_monitoring_settings():
+    env = env_file(APPS / "monitoring" / "settings.env")
+    assert not [k for k in env if "PASSWORD" in k or k.endswith("SECRET")], "secrets only come from the rendered env file"
+    ak = "https://auth.service.veronoi.cc/application/o"
+    assert env["GF_SERVER_ROOT_URL"] == "https://grafana.service.veronoi.cc"
+    assert env["GF_AUTH_GENERIC_OAUTH_ENABLED"] == "true" and env["GF_AUTH_GENERIC_OAUTH_NAME"] == "Authentik"
+    assert env["GF_AUTH_GENERIC_OAUTH_SCOPES"] == "openid profile email"
+    assert env["GF_AUTH_GENERIC_OAUTH_AUTH_URL"] == f"{ak}/authorize/"
+    assert env["GF_AUTH_GENERIC_OAUTH_TOKEN_URL"] == f"{ak}/token/"
+    assert env["GF_AUTH_GENERIC_OAUTH_API_URL"] == f"{ak}/userinfo/"
+    assert env["GF_AUTH_GENERIC_OAUTH_SIGNOUT_REDIRECT_URL"] == f"{ak}/grafana/end-session/"
+    assert env["GF_AUTH_GENERIC_OAUTH_LOGIN_ATTRIBUTE_PATH"] == "preferred_username"
+    assert env["GF_AUTH_GENERIC_OAUTH_EMAIL_ATTRIBUTE_PATH"] == "email"
+    assert env["GF_AUTH_GENERIC_OAUTH_USE_PKCE"] == "true"
+    # login only through Authentik, straight away (auto_login in the provider section; [auth] oauth_auto_login is deprecated)
+    assert env["GF_AUTH_DISABLE_LOGIN_FORM"] == env["GF_AUTH_GENERIC_OAUTH_AUTO_LOGIN"] == "true"
+    assert "GF_AUTH_OAUTH_AUTO_LOGIN" not in env
+    # only `authentik Admins` get in, as Grafana Admin: with role_attribute_strict a user whose role_attribute_path yields no
+    # valid role is refused (generic_oauth.go postProcessUserInfo), skip_org_role_sync must stay off so the path is evaluated
+    assert env["GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH"] == "contains(groups[*], 'authentik Admins') && 'GrafanaAdmin'"
+    assert env["GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_STRICT"] == "true"
+    assert env["GF_AUTH_GENERIC_OAUTH_ALLOW_ASSIGN_GRAFANA_ADMIN"] == "true"
+    assert env.get("GF_AUTH_GENERIC_OAUTH_SKIP_ORG_ROLE_SYNC", "false") == "false"
+    assert env["GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP"] == "true"  # creates the user at the first login; Authentik decides who may
+    # public dashboards in third-party iframes: no cookie needed for an anonymous viewer, only the frame header
+    assert env["GF_SECURITY_ALLOW_EMBEDDING"] == "true" and env["GF_SECURITY_COOKIE_SECURE"] == "true"
+    assert "GF_SECURITY_COOKIE_SAMESITE" not in env
+
+
+def test_monitoring_routes():
+    route = load_routes(APPS / "monitoring" / "routes.yml")
+    assert set(route) == {"http"}, "no tcp route: the database is never routed (mesh address only)"
+    http = route["http"]
+    ip = containers("monitoring")["grafana"]["Container"]["PublishPort"][0].split(":")[0]
+    assert http["services"] == {"grafana": {"loadBalancer": {"servers": [{"url": f"http://{ip}:3000"}]}}}
+    assert set(http["routers"]) == {"grafana", "grafana-public"}
+    main, public = http["routers"]["grafana"], http["routers"]["grafana-public"]
+    assert main["rule"] == f"Host(`{GRAFANA_HOST}`)" and main["entryPoints"] == ["mesh"] and main["service"] == "grafana"
+    # the internet gets exactly the verified public-dashboard prefixes, nothing else
+    paths = " || ".join(f"PathPrefix(`{p}`)" for p in GRAFANA_PUBLIC_PREFIXES)
+    assert public["rule"] == f"Host(`{GRAFANA_HOST}`) && ({paths})"
+    assert public["entryPoints"] == ["websecure"] and public["service"] == "grafana"
+    assert "middlewares" not in http
+    for r in (main, public):
+        check_router("t", r)
+    check_mesh_coverage(http["routers"])
+    assert "monitoring" in NODES["coke"] and "monitoring" not in NODES["ecstasy"]
 
 
 
@@ -754,8 +903,8 @@ def test_no_private_keys_or_plaintext_config_in_the_repo():
         if rel.parts[0] not in ("tests",) and p.name != "README.md":
             # plaintext NetBird config / Authentik env would carry these keys with a literal value
             assert not re.search(rb"(?m)^\s*(encryptionKey|authSecret|sessionCookieEncryptionKey):\s*[\"']?[A-Za-z0-9+/=]{16,}", data), rel
-            assert not re.search(rb"(?m)^(AUTHENTIK_SECRET_KEY|POSTGRES_PASSWORD|AUTHENTIK_POSTGRESQL__PASSWORD|AUTHENTIK_NETBIRD_CLIENT_SECRET|AUTHENTIK_PAPERLESS_CLIENT_SECRET|PAPERLESS_SECRET_KEY|PAPERLESS_SOCIALACCOUNT_PROVIDERS)=[^E\s]", data), rel
-    for forbidden in (ROOT / "secrets" / "ecstasy" / "config.yaml", ROOT / "secrets" / "coke" / "authentik.env", ROOT / "secrets" / "coke" / "paperless.env", ROOT / "secrets" / "coke" / "authentik-paperless.env", APPS / "netbird" / "config.yaml"):
+            assert not re.search(rb"(?m)^(AUTHENTIK_SECRET_KEY|POSTGRES_PASSWORD|AUTHENTIK_POSTGRESQL__PASSWORD|AUTHENTIK_NETBIRD_CLIENT_SECRET|AUTHENTIK_PAPERLESS_CLIENT_SECRET|AUTHENTIK_GRAFANA_CLIENT_SECRET|PAPERLESS_SECRET_KEY|PAPERLESS_SOCIALACCOUNT_PROVIDERS|GRAFANA_DB_PASSWORD|GF_SECURITY_ADMIN_PASSWORD|GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET)=[^E\s]", data), rel
+    for forbidden in (ROOT / "secrets" / "ecstasy" / "config.yaml", ROOT / "secrets" / "coke" / "authentik.env", ROOT / "secrets" / "coke" / "paperless.env", ROOT / "secrets" / "coke" / "authentik-paperless.env", ROOT / "secrets" / "coke" / "monitoring.env", ROOT / "secrets" / "coke" / "authentik-grafana.env", APPS / "netbird" / "config.yaml"):
         assert not forbidden.exists()
 
 

@@ -281,6 +281,7 @@ NB_UNITS = ("netbird-server.service", "netbird-dashboard.service")
 BACKEND_UNITS = ("traefik.service", *NB_UNITS)
 AK_UNITS = ("authentik-postgres.service", "authentik-server.service", "authentik-worker.service")
 PAPERLESS_UNITS = ("paperless-valkey.service", "paperless.service")
+MONITORING_UNITS = ("timescaledb.service", "grafana.service")
 CONFIG = "/var/data/netbird-server/config.yaml"
 PAT_PASSWORD = "Smoke-Passw0rd!"
 
@@ -466,14 +467,14 @@ def test_ecstasy_apps_are_declarative(vm, tmp_path, real_tools):
     avc = sudo("sh", "-c", "ausearch -m avc -ts boot 2>/dev/null | grep -c -E 'traefik|netbird' || true", check=False).stdout.strip()
     print("traefik/netbird AVC denials since boot:", avc)
 
-    # 6. routes follow the app: with the node files in the repo copy, Traefik gets authentik/ and paperless/ route files (apps of coke)
+    # 6. routes follow the app: with the node files in the repo copy, Traefik gets authentik/, paperless/ and monitoring/ route files (apps of coke)
     # and no quadlets of them; the new routes are picked up by reload (no restart), 502/504 because coke is not there yet
     shutil.copytree(ROOT / "nodes", src / "nodes")
     push(vm, src)
     before = unit_props(vm, ("traefik.service",), "ActiveEnterTimestampMonotonic")
     r = ssh(*apps_sync_cmd(), check=False)  # the node's full list
     assert r.returncode == 0, r.stderr
-    for app in ("authentik", "paperless"):
+    for app in ("authentik", "paperless", "monitoring"):
         assert ssh("ls", f"{d}/{app}").stdout.split() == ["routes.yml"], app
     wait_for(lambda: code(vm, AUTH_HOST, "/") in {"502", "504"}, "the authentik route after the reload", 60, 2)
     assert unit_props(vm, ("traefik.service",), "ActiveEnterTimestampMonotonic") == before, "Traefik was restarted instead of reloaded"
@@ -541,7 +542,7 @@ def test_coke_runs_authentik_behind_ecstasys_traefik(vm, coke, tmp_path, real_to
     mesh = mesh_address()
     assert ipaddress.ip_address(mesh) in ipaddress.ip_network("100.64.0.0/10")
     assert ssh("hostname").stdout.strip() == f"coke.{coke['domain']}"
-    assert 'APPS_LIST="authentik paperless"' in sudo("cat", "/etc/apps-sync.env").stdout  # = apps: of nodes/coke.yml
+    assert 'APPS_LIST="authentik paperless monitoring"' in sudo("cat", "/etc/apps-sync.env").stdout  # = apps: of nodes/coke.yml
     join_mesh(coke, mesh)
     assert ssh("curl", "-s", "-o", "/dev/null", "--max-time", "2", f"http://{mesh}:9", check=False).returncode in {7, 28}  # coke's own address, nothing listens
     src = make_src(tmp_path, "coke")
@@ -551,13 +552,13 @@ def test_coke_runs_authentik_behind_ecstasys_traefik(vm, coke, tmp_path, real_to
     r = ssh(*apps_sync_cmd(), check=False)
     assert r.returncode == 0, r.stderr
     d = "/etc/containers/systemd/apps"
-    assert ssh("ls", d).stdout.split() == ["authentik", "paperless"]
+    assert ssh("ls", d).stdout.split() == ["authentik", "monitoring", "paperless"]
     ssh("test", "!", "-e", f"{d}/authentik/README.md")
-    for state in unit_props(coke, (*AK_UNITS, *PAPERLESS_UNITS), "ConditionResult").values():
+    for state in unit_props(coke, (*AK_UNITS, *PAPERLESS_UNITS, *MONITORING_UNITS), "ConditionResult").values():
         assert state == "ConditionResult=no", state
     assert unit_props(coke, ("netbird.service",), "ConditionResult") == {"netbird.service": "ConditionResult=no"}
     vols = sudo("podman", "volume", "ls", "--format", "{{.Name}}").stdout.split()
-    assert {"authentik-postgres", "authentik-data", "authentik-certs", "paperless-data", "paperless-media"} <= set(vols), vols
+    assert {"authentik-postgres", "authentik-data", "authentik-certs", "paperless-data", "paperless-media", "timescaledb-data", "grafana-data"} <= set(vols), vols
     assert sudo("systemctl", "is-active", "traefik.service", check=False).stdout.strip() != "active"
 
     # 2. node key, then the README recipe encrypts to admin + coke's own key
@@ -566,10 +567,12 @@ def test_coke_runs_authentik_behind_ecstasys_traefik(vm, coke, tmp_path, real_to
     pub = sudo("cat", "/var/data/secrets/age.pub").stdout.strip()
     admin = run_recipe(readme_recipe("authentik", "p=$("), src, tmp_path, real_tools, "coke", pub)
     assert [p.name for p in (src / "secrets" / "coke").iterdir() if p.suffix == ".sops"] == ["authentik.env.sops"]
-    # the worker is also gated on authentik-paperless.env (the Paperless blueprint's client secret): a dummy one, so it starts.
-    # paperless.env is deliberately not rendered: the Paperless units must stay skipped (no image pull, no 4 GB RAM on top).
+    # the worker is also gated on authentik-paperless.env and authentik-grafana.env (the blueprints' client secrets): dummies, so it starts.
+    # paperless.env and monitoring.env are deliberately not rendered: those units must stay skipped (no image pull, no RAM on top).
     encrypt_env(real_tools, tmp_path, pub, src / "secrets" / "coke" / "authentik-paperless.env.sops",
                 "AUTHENTIK_PAPERLESS_CLIENT_SECRET=smoke-not-the-real-secret\n")
+    encrypt_env(real_tools, tmp_path, pub, src / "secrets" / "coke" / "authentik-grafana.env.sops",
+                "AUTHENTIK_GRAFANA_CLIENT_SECRET=smoke-not-the-real-secret\n")
     push(coke, src)
     r = ssh(*SYNC, check=False)
     assert r.returncode == 0, r.stderr
@@ -578,6 +581,10 @@ def test_coke_runs_authentik_behind_ecstasys_traefik(vm, coke, tmp_path, real_to
     assert "skipping paperless.env.sops" in r.stderr
     assert sudo("stat", "-c", "%a %U:%G", "/var/data/secrets/authentik-paperless.env").stdout.strip() == "600 root:root"
     sudo("test", "!", "-e", "/var/data/secrets/paperless.env")
+    assert "skipping monitoring.env.sops" in r.stderr
+    sudo("test", "!", "-e", "/var/data/secrets/monitoring.env")
+    for u, state in unit_props(coke, MONITORING_UNITS, "ConditionResult").items():
+        assert state == "ConditionResult=no", (u, state)
     for u, state in unit_props(coke, PAPERLESS_UNITS, "ConditionResult").items():
         assert state == "ConditionResult=no", (u, state)
     assert set(unit_props(coke, PAPERLESS_UNITS, "ActiveState").values()) == {"ActiveState=inactive"}
