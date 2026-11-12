@@ -289,6 +289,8 @@ Paperless-ngx on coke (`paperless.service.veronoi.cc`, mesh only except public `
 [`apps/paperless/README.md`](apps/paperless/README.md) (setup order, first superuser, backup, route).
 Grafana and TimescaleDB on coke (`grafana.service.veronoi.cc`, mesh only except public-dashboard paths, login only via Authentik; the database on the mesh address, TCP 5432):
 [`apps/monitoring/README.md`](apps/monitoring/README.md) (topology, secrets, public dashboards and embedding).
+scanservjs on coke (`scan.service.veronoi.cc`, mesh only, no login of its own; web UI for the HP flatbed, scans go through the shared `paperless-consume` volume into Paperless):
+[`apps/scanservjs/README.md`](apps/scanservjs/README.md) (scanner config, ownership, printer quirks, NetBird policy, DHCP reservation).
 
 **Client fwmark fix (masquerade collision).** NetBird's default fwmark (`0x1bd21`/`0x1bd22`) has bit `0x2000` set, and netavark's
 hostport rule `meta mark & 0x2000 == 0x2000 masquerade` matched it: every connection DNATed to a published container port (Traefik on

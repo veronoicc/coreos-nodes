@@ -1,6 +1,6 @@
 # Paperless-ngx (document archive, mesh + public share links, login via Authentik)
 
-Paperless-ngx 3.4 (web server + consumer in one container, Valkey broker, SQLite) on **coke** (`apps: [authentik, paperless]` in
+Paperless-ngx 3.4 (web server + consumer in one container, Valkey broker, SQLite) on **coke** (`apps: [authentik, paperless, monitoring, scanservjs]` in
 `nodes/coke.yml`). Reachable at `https://paperless.service.veronoi.cc` from the **mesh** (split DNS: mesh peers resolve it to ecstasy's
 mesh IP; domain scheme: root [README](../../README.md), Domain scheme). The **internet** only sees `/share/...` (share links). Login only through Authentik (`auth.service.veronoi.cc`, OIDC). Declarative: Quadlets and settings via `apps-sync`,
 secrets as `secrets/coke/paperless.env.sops` via `secrets-sync`. Generic mechanics: root README.
@@ -44,11 +44,21 @@ A test checks that `paperless-share` is the only `websecure` router and that its
 | `paperless-valkey.container` | `docker.io/valkey/valkey:9-alpine`, the task broker. No volume: the queue is disposable. |
 | `paperless.network` | Private network of the stack. |
 | `paperless-data.volume`, `paperless-media.volume` | `/usr/src/paperless/data` (SQLite database, index) and `/usr/src/paperless/media` (the documents). Both `# apps-sync: keep`. |
-| `settings.env` | Non-secret settings (URL, broker, time zone, OCR `deu+eng` (both ship in the image), proxy headers, SSO flags). |
+| `paperless-consume.volume` | `/usr/src/paperless/consume`, the consume folder, shared with scanservjs (below). `# apps-sync: keep`. |
+| `settings.env` | Non-secret settings (URL, broker, time zone, OCR `deu+eng` (both ship in the image), consumer stability delay, proxy headers, SSO flags). |
 | `/var/data/secrets/paperless.env` | secrets-sync, 0600 root: `PAPERLESS_SECRET_KEY` and `PAPERLESS_SOCIALACCOUNT_PROVIDERS` (the Authentik OIDC client incl. its secret). |
 
 Both units have `ConditionPathExists=/var/data/secrets/paperless.env`: before the first render they are skipped, afterwards
-`secrets-sync` restarts them when the file changes. No consume folder is mounted: documents are uploaded in the web UI.
+`secrets-sync` restarts them when the file changes.
+
+## Consume folder (scans from scanservjs)
+
+The named volume `paperless-consume` is mounted (`:z`) at `/usr/src/paperless/consume` and is also the output directory of [scanservjs](../scanservjs/README.md)
+(`scan.service.veronoi.cc`, same node). Paperless imports every file that appears there and deletes it afterwards. Ownership: Paperless chowns the folder to
+`paperless:paperless` (`USERMAP_UID/GID`, default 1000) at each start; scanservjs runs as root and writes `0644` files, which Paperless can read and, as owner of
+the directory, delete. `PAPERLESS_CONSUMER_STABILITY_DELAY=10` (default 5.0) makes the consumer wait until a file kept its size and mtime for 10 s, because scanservjs
+copies the finished PDF into the folder rather than renaming it. Files can also be dropped in by hand
+(`sudo cp x.pdf /var/data/containers/storage/volumes/paperless-consume/_data/`); the web upload still works as before.
 
 ## Login: only Authentik
 
@@ -110,7 +120,7 @@ Alternatively `sudo podman exec --user paperless paperless document_exporter ../
 
 ## Reset (wipe) and the persistent volumes
 
-Both volume files carry `# apps-sync: keep`: `sudo apps-sync reset paperless` replaces the containers and the network but keeps the
+All three volume files carry `# apps-sync: keep`: `sudo apps-sync reset paperless` replaces the containers and the network but keeps the
 documents; `sudo apps-sync reset --include-persistent paperless` also deletes the volumes (an empty Paperless: database and every
 document gone; the first SSO login creates a new user that has to be promoted again). Removing the app from git stops its units and
 keeps the volumes. On a node that still runs the old `apps-sync` use the form from the root README ("Apps from git").

@@ -23,6 +23,10 @@ EnvironmentFile=/etc/containers/systemd/apps/paperless/settings.env
 EnvironmentFile=/var/data/secrets/paperless.env
 Volume=paperless-data.volume:/usr/src/paperless/data
 Volume=paperless-media.volume:/usr/src/paperless/media
+# The consume folder is shared with scanservjs (apps/scanservjs), which writes its scans here as root. Paperless chowns the folder
+# to its own user at every start (s6 init-folders: chown paperless:paperless), so it can read and delete the files.
+# :z because two containers (different SELinux categories) share it.
+Volume=paperless-consume.volume:/usr/src/paperless/consume:z
 
 [Service]
 Restart=on-failure

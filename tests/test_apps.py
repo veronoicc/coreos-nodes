@@ -1,4 +1,4 @@
-"""The apps under apps/ (traefik, netbird, authentik, paperless, monitoring) are declarative: lint the repo files.
+"""The apps under apps/ (traefik, netbird, authentik, paperless, monitoring, scanservjs) are declarative: lint the repo files.
 
 Everything here runs without a VM. tests/test_smoke_qemu.py boots the real thing."""
 import ipaddress
@@ -69,8 +69,8 @@ def targets(node):
 
 
 def test_apps_and_node_lists():
-    assert {p.name for p in APPS.iterdir()} == {"traefik", "netbird", "authentik", "paperless", "monitoring"}
-    assert NODES == {"ecstasy": ["traefik", "netbird"], "coke": ["authentik", "paperless", "monitoring"]}
+    assert {p.name for p in APPS.iterdir()} == {"traefik", "netbird", "authentik", "paperless", "monitoring", "scanservjs"}
+    assert NODES == {"ecstasy": ["traefik", "netbird"], "coke": ["authentik", "paperless", "monitoring", "scanservjs"]}
     assert not (ROOT / "tests" / "test_netbird_backend.py").exists()
 
 
@@ -172,6 +172,7 @@ def test_images_pinned():
     assert re.fullmatch(r"docker\.io/valkey/valkey:\d+-alpine", img["paperless-valkey"])
     assert re.fullmatch(r"docker\.io/timescale/timescaledb:\d+\.\d+\.\d+-pg17", img["timescaledb"])
     assert re.fullmatch(r"docker\.io/grafana/grafana:\d+\.\d+\.\d+", img["grafana"])
+    assert re.fullmatch(r"docker\.io/sbs20/scanservjs:\d+\.\d+\.\d+", img["scanservjs"])
 
 
 @pytest.mark.parametrize("vol", sorted(p for a in NODES_ALL for p in (APPS / a).glob("*.volume")), ids=lambda p: p.name)
@@ -651,7 +652,8 @@ def test_paperless_units_gated_on_the_rendered_secrets():
     c = containers("paperless")["paperless"]["Container"]
     assert c["EnvironmentFile"] == ["/etc/containers/systemd/apps/paperless/settings.env", dest]
     assert c["Network"] == ["paperless.network"] and containers("paperless")["paperless-valkey"]["Container"]["Network"] == ["paperless.network"]
-    assert sorted(c["Volume"]) == ["paperless-data.volume:/usr/src/paperless/data", "paperless-media.volume:/usr/src/paperless/media"]
+    assert sorted(c["Volume"]) == ["paperless-consume.volume:/usr/src/paperless/consume:z", "paperless-data.volume:/usr/src/paperless/data",
+                                   "paperless-media.volume:/usr/src/paperless/media"]
 
 
 def test_paperless_settings():
@@ -669,6 +671,8 @@ def test_paperless_settings():
     assert {env[k] for k in ("PAPERLESS_DISABLE_REGULAR_LOGIN", "PAPERLESS_REDIRECT_LOGIN_TO_SSO", "PAPERLESS_SOCIAL_AUTO_SIGNUP")} == {"true"}
     assert env["PAPERLESS_ACCOUNT_ALLOW_SIGNUPS"] == "false"
     assert env["PAPERLESS_LOGOUT_REDIRECT_URL"] == "https://auth.service.veronoi.cc/application/o/paperless/end-session/"
+    # scanservjs copies a finished PDF into the consume folder (not an atomic rename): wait for a stable size/mtime
+    assert float(env["PAPERLESS_CONSUMER_STABILITY_DELAY"]) >= 5
 
 
 # -------------------------------------------------------------- monitoring
@@ -786,6 +790,70 @@ def test_monitoring_routes():
     assert "monitoring" in NODES["coke"] and "monitoring" not in NODES["ecstasy"]
 
 
+# -------------------------------------------------------------- scanservjs
+
+SCAN_HOST = "scan.service.veronoi.cc"
+
+
+def test_scanservjs_is_published_on_the_mesh_address_only():
+    cs = containers("scanservjs")
+    assert set(cs) == {"scanservjs"}
+    u = cs["scanservjs"]
+    publish = u["Container"]["PublishPort"]
+    assert len(publish) == 1, publish
+    ip, host_port, container_port = publish[0].split(":")
+    assert ipaddress.ip_address(ip) in MESH and ip == "100.127.197.215", f"{ip} must be coke's mesh address, never 0.0.0.0"
+    assert container_port == "8080" and host_port not in {"8000", "9000", "3000", "5432"}  # the other apps on coke
+    assert "netbird.service" in u["Unit"]["After"][0].split() and "netbird.service" in u["Unit"]["Wants"][0].split()
+    assert u["Unit"]["StartLimitIntervalSec"] == ["0"] and u["Service"]["Restart"] == ["on-failure"]
+
+
+def test_scanservjs_route_is_mesh_only_and_points_at_the_published_address():
+    ip, host_port, _ = containers("scanservjs")["scanservjs"]["Container"]["PublishPort"][0].split(":")
+    http = load_routes(APPS / "scanservjs" / "routes.yml")["http"]
+    assert http["services"] == {"scanservjs": {"loadBalancer": {"servers": [{"url": f"http://{ip}:{host_port}"}]}}}
+    assert set(http["routers"]) == {"scanservjs"}
+    router = http["routers"]["scanservjs"]
+    assert router["rule"] == f"Host(`{SCAN_HOST}`)" and router["entryPoints"] == ["mesh"] and router["service"] == "scanservjs"
+    assert "middlewares" not in http  # no login of its own: nothing of it may be public
+    check_router("t", router)
+    check_mesh_coverage(http["routers"])
+    assert "scanservjs" in NODES["coke"] and "scanservjs" not in NODES["ecstasy"]
+
+
+def test_scanservjs_shares_the_consume_volume_with_paperless_on_the_same_node():
+    scan = containers("scanservjs")["scanservjs"]["Container"]
+    # the same persistent volume unit in both, z (shared label): paperless chowns it to itself at each start, scanservjs runs as root
+    # (the published image has no USER, verified from its config) and writes 0644 files into it
+    assert "paperless-consume.volume:/var/lib/scanservjs/output:z" in scan["Volume"]
+    assert "paperless-consume.volume:/usr/src/paperless/consume:z" in containers("paperless")["paperless"]["Container"]["Volume"]
+    assert (APPS / "paperless" / "paperless-consume.volume").exists() and not list((APPS / "scanservjs").glob("*.volume"))
+    assert {"paperless", "scanservjs"} <= set(NODES["coke"])
+    assert "User" not in scan and "UserNS" not in scan and "PodmanArgs" not in scan
+
+
+def test_scanservjs_static_scanner_and_no_ignored_discovery():
+    c = containers("scanservjs")["scanservjs"]["Container"]
+    assert c["AddHost"] == ["printer.device:10.0.0.34"]
+    assert c["EnvironmentFile"] == ["/etc/containers/systemd/apps/scanservjs/settings.env"]
+    assert "Environment" not in c  # settings.env is read raw by podman, the quotes of the airscan entry survive
+    env = env_file(APPS / "scanservjs" / "settings.env")
+    assert env == {"AIRSCAN_DEVICES": '"HP Smart Tank 580" = "http://printer.device:8080/eSCL"'}
+    # discovery stays on: SCANIMAGE_LIST_IGNORE would stop `scanimage -L` (and the UI would list no device) unless DEVICES is set
+    assert "SCANIMAGE_LIST_IGNORE" not in "".join(l for l in (APPS / "scanservjs" / "scanservjs.container").read_text().splitlines() if not l.startswith("#"))
+    assert c["Volume"][0] == "/etc/containers/systemd/apps/scanservjs/config.local.js:/etc/scanservjs/config.local.js:ro,z"
+
+
+def test_scanservjs_config_local_js():
+    js = (APPS / "scanservjs" / "config.local.js").read_text()
+    assert "config.batchModes = ['none', 'manual'];" in js
+    pipelines = re.findall(r"description: '([^']+)'", js)
+    assert pipelines == ["PDF Color (JPG | @:pipeline.high-quality)", "PDF Gray (JPG | @:pipeline.high-quality)"]  # Color first = default
+    assert "tesseract" not in js  # OCR is Paperless's job
+    for needle in ("f['--mode'].default = 'Color'", "f['--resolution'].default = 300", "f['-x'].default = 210", "f['-y'].default = 297"):
+        assert needle in js, needle
+
+
 
 # ---------------------------------------------- README recipes with real sops
 
@@ -889,7 +957,7 @@ def test_no_socket_mounts_or_secret_literals_in_apps():
             assert not re.search(r"(?=[A-Za-z0-9+/]*\d)(?=[A-Za-z0-9+/]*[A-Z])[A-Za-z0-9+/]{32,}", text), f"secret-looking literal in {p}"
             assert not re.search(r"(?i)^\s*(Environment|Secret)=.*(secret|password|key|token)", text, re.M), p
             if p.name != "README.md":
-                assert "@" not in text, f"email-like literal in {p}"
+                assert not re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", text), f"email-like literal in {p}"
 
 
 def test_no_private_keys_or_plaintext_config_in_the_repo():

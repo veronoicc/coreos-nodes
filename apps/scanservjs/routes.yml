@@ -1,0 +1,20 @@
+# Traefik route for scan.service.veronoi.cc. scanservjs runs on coke, which accepts no inbound connections: Traefik reaches it
+# over the NetBird mesh at coke's mesh address. Mesh peers only (the `mesh` entrypoint): scanservjs has no login of its own
+# and nothing of it is meant for the internet, so there is no `websecure` router.
+# MESH ADDRESS: the same address is in apps/scanservjs/scanservjs.container (PublishPort); a test checks they match.
+# See apps/scanservjs/README.md.
+http:
+  routers:
+    scanservjs:
+      rule: Host(`scan.service.veronoi.cc`)
+      entryPoints: [mesh]
+      tls:
+        certResolver: letsencrypt-dns
+        domains:
+          - main: "*.service.veronoi.cc"
+      service: scanservjs
+  services:
+    scanservjs:
+      loadBalancer:
+        servers:
+          - url: http://100.127.197.215:8081

@@ -1,0 +1,6 @@
+# apps-sync: keep
+# Paperless /usr/src/paperless/consume: the consume folder, also scanservjs's output directory (apps/scanservjs). Files wait here
+# until Paperless has imported them, so scans must survive a reset of the apps.
+# Persistent: `apps-sync reset paperless` keeps it, only `apps-sync reset --include-persistent paperless` removes it.
+[Volume]
+VolumeName=paperless-consume
