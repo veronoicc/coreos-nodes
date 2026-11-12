@@ -253,6 +253,8 @@ Traefik over the NetBird mesh), shared Traefik: all declarative, nothing app-spe
 order of steps, backup and security notes: [`apps/netbird/README.md`](apps/netbird/README.md),
 [`apps/authentik/README.md`](apps/authentik/README.md), [`apps/traefik/README.md`](apps/traefik/README.md).
 The NetBird *client* (`netbird.container`, `NB_SETUP_KEY` from `secrets/<node>/netbird.env.sops`) is baked into the Ignition and is not an app.
+Paperless-ngx on coke (`paperless.service.veronoi.cc`, mesh-only, login only via Authentik) is a service of the [domain scheme](#domain-scheme-services-public-mesh-only-or-both):
+[`apps/paperless/README.md`](apps/paperless/README.md) (setup order, first superuser, backup) and [`apps/paperless-route`](apps/paperless-route/README.md) (ecstasy's route).
 
 **Client fwmark fix (masquerade collision).** NetBird's default fwmark (`0x1bd21`/`0x1bd22`) has bit `0x2000` set, and netavark's
 hostport rule `meta mark & 0x2000 == 0x2000 masquerade` matched it: every connection DNATed to a published container port (Traefik on

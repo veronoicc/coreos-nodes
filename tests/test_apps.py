@@ -69,8 +69,8 @@ def targets(node):
 
 
 def test_apps_and_node_lists():
-    assert {p.name for p in APPS.iterdir()} == {"traefik", "netbird", "authentik", "authentik-route", "paperless"}
-    assert NODES == {"ecstasy": ["traefik", "netbird", "authentik-route"], "coke": ["authentik", "paperless"]}
+    assert {p.name for p in APPS.iterdir()} == {"traefik", "netbird", "authentik", "authentik-route", "paperless", "paperless-route"}
+    assert NODES == {"ecstasy": ["traefik", "netbird", "authentik-route", "paperless-route"], "coke": ["authentik", "paperless"]}
     assert not (ROOT / "tests" / "test_netbird_backend.py").exists()
 
 
@@ -511,6 +511,15 @@ def test_paperless_is_published_on_the_mesh_address_only():
     assert "netbird.service" in u["Unit"]["After"][0].split() and "netbird.service" in u["Unit"]["Wants"][0].split()
     assert u["Unit"]["StartLimitIntervalSec"] == ["0"] and u["Service"]["Restart"] == ["on-failure"]
     assert u["Unit"]["Requires"] == ["paperless-valkey.service"] and "paperless-valkey.service" in u["Unit"]["After"][0].split()
+
+
+def test_paperless_route_is_mesh_only_and_points_at_the_published_address():
+    ip = containers("paperless")["paperless"]["Container"]["PublishPort"][0].split(":")[0]
+    route = load_routes(APPS / "paperless-route" / "routes.yml")["http"]  # check_router runs on it via the ecstasy route test
+    assert route["services"]["paperless"]["loadBalancer"]["servers"] == [{"url": f"http://{ip}:8000"}]
+    router = route["routers"]["paperless"]
+    assert router["rule"] == "Host(`paperless.service.veronoi.cc`)" and router["entryPoints"] == ["mesh"]
+    assert "paperless-route" in NODES["ecstasy"] and "paperless-route" not in NODES["coke"]
 
 
 def test_paperless_units_gated_on_the_rendered_secrets():

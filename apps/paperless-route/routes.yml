@@ -1,0 +1,20 @@
+# Traefik route for paperless.service.veronoi.cc, mesh-only: served on the `mesh` entrypoint (ecstasy's mesh IP) only, no
+# public DNS record. Paperless itself runs on coke, which accepts no inbound connections: Traefik reaches it over the
+# NetBird mesh at coke's mesh address.
+# MESH ADDRESS: the same address is in apps/paperless/paperless.container (PublishPort); a test checks they match.
+# See apps/paperless/README.md.
+http:
+  routers:
+    paperless:
+      rule: Host(`paperless.service.veronoi.cc`)
+      entryPoints: [mesh]
+      tls:
+        certResolver: letsencrypt-dns
+        domains:
+          - main: "*.service.veronoi.cc"
+      service: paperless
+  services:
+    paperless:
+      loadBalancer:
+        servers:
+          - url: http://100.127.197.215:8000

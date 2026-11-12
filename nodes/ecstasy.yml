@@ -11,7 +11,7 @@ device: /dev/sda
 disk_gib: 20
 
 # Apps from apps/ this node runs (everything else is removed; empty or missing = no apps).
-apps: [traefik, netbird, authentik-route]
+apps: [traefik, netbird, authentik-route, paperless-route]
 
 # Extra users on top of config.yml (same shape):
 # users:
