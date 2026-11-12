@@ -11,7 +11,7 @@ The NetBird **client** on the node is not an app, it is baked into the Ignition 
 |---|---|---|
 | `netbird-server.container` | apps-sync | `netbirdio/netbird-server`: management, signal, relay, STUN and the embedded Dex IdP in one container. Publishes only `3478/udp`. |
 | `netbird-dashboard.container`, `dashboard.env` | apps-sync | Web UI, not published. `dashboard.env` is plain (no secrets). |
-| `routes.yml` | apps-sync | Traefik routes (gRPC h2c, WebSocket/relay, API, OAuth2, dashboard) for `netbird.veronoi.cc`, loaded by `apps/traefik`. Each router has a `netbird-service-*` twin for `netbird.service.veronoi.cc` (public + mesh, wildcard certificate), the target host of the planned cutover; the old host stays until then. |
+| `routes.yml` | apps-sync | Traefik routes (gRPC h2c, WebSocket/relay, API, OAuth2, dashboard) for `netbird.service.veronoi.cc` (public + mesh, wildcard certificate), loaded by `apps/traefik`. |
 | `netbird-data.volume` | apps-sync | Named volume with the NetBird database. Persistent. |
 | `/var/data/netbird-server/config.yaml` | secrets-sync | The server config with all secrets, from `secrets/ecstasy/netbird-server.yaml.sops` (0600 root). |
 
@@ -42,9 +42,9 @@ Details: root README, "Change users (reinstall, keep data)".
 
 ## Prerequisites
 
-- DNS: an **A** record `netbird.veronoi.cc` -> `176.65.149.212` (ecstasy). **Remove the AAAA (IPv6) record**: Let's Encrypt prefers IPv6
-  when it exists and the challenge then fails (ecstasy has no working public IPv6 with `80/443` open).
-- Provider firewall: `80/tcp` and `443/tcp` (HTTP redirect, HTTPS/gRPC/WebSocket, Let's Encrypt) and `3478/udp` (STUN cannot be proxied).
+- DNS: nothing to create: `netbird.service.veronoi.cc` is covered by the Cloudflare wildcard `A *.service` -> `176.65.149.212` (ecstasy), **no AAAA**
+  (the public IP must be the only answer; ecstasy has no working public IPv6 with `80/443` open).
+- Provider firewall: `80/tcp` and `443/tcp` (HTTP redirect, HTTPS/gRPC/WebSocket) and `3478/udp` (STUN cannot be proxied).
 - The node has 2 GB+ RAM and the secrets tooling set up (age key published, your admin key a recipient, `.sops.yaml` committed:
   root README, "Secrets").
 - `apps/netbird` and `apps/traefik` are on the branch `apps-sync` follows (`repo_url`/`branch` in `config.yml`).
@@ -187,9 +187,8 @@ connector, and the local login is switched off**:
    `sops --decrypt --extract '["AUTHENTIK_NETBIRD_CLIENT_SECRET"]' --input-type dotenv --output-type dotenv secrets/coke/authentik.env.sops`
    (verified with the pinned sops 3.13.3: prints just the value).
 2. NetBird dashboard -> **Settings -> Identity Providers -> Add Identity Provider**: Type `Generic OIDC`, Name `Authentik`,
-   Client ID `netbird`, Client Secret = the value from step 1, Issuer `https://auth.veronoi.cc/application/o/netbird/`.
-   (New issuer value once the switch happens: `https://auth.service.veronoi.cc/application/o/netbird/`; the old value above keeps working meanwhile.)
-   The redirect URL the dashboard shows is `https://netbird.veronoi.cc/oauth2/callback`; the Authentik blueprint (`apps/authentik`) already
+   Client ID `netbird`, Client Secret = the value from step 1, Issuer `https://auth.service.veronoi.cc/application/o/netbird/`.
+   The redirect URL the dashboard shows is `https://netbird.service.veronoi.cc/oauth2/callback`; the Authentik blueprint (`apps/authentik`) already
    contains exactly that (strict) plus the logout callback, so there is nothing to copy into Authentik. Click **Add Provider**.
 3. Switch the local email/password login off (only Authentik remains on the sign-in page), then commit, push and let `secrets-sync`
    restart the server:
@@ -236,6 +235,23 @@ The installed version also does not recreate a changed network: stop the app's u
 Images are pinned in the Quadlets (`netbird-server`, `dashboard`). Bump the tags in git; `apps-sync` restarts only the changed units.
 Nothing uses `AutoUpdate`. A change to `dashboard.env` restarts the app's containers (apps-sync restarts all containers of an app when a
 plain file changes); a change to `routes.yml` reloads Traefik.
+
+## Renaming the NetBird host
+
+Historical: NetBird moved from `netbird.veronoi.cc` to `netbird.service.veronoi.cc` (Authentik from `auth.veronoi.cc` to `auth.service.veronoi.cc`). What a rename needs:
+
+1. `secrets/ecstasy/netbird-server.yaml.sops`: `server.exposedAddress`, `server.auth.issuer` (`<new host>/oauth2`) and `server.dashboardRedirectURIs`; `dashboard.env`: the management/issuer URLs.
+2. Every client: `NB_MANAGEMENT_URL` in `secrets/<node>/netbird.env.sops`. The env var is **not** applied on a restart (the stored `ManagementURL` wins), so on each peer run
+   `netbird down` and `netbird up --management-url https://<new host>`; the client must also be restarted to pick up the new signal URL.
+3. Authentik: the redirect URIs in `apps/authentik/netbird-blueprint.yaml` and `meta_launch_url`; the IdP issuer `https://<new auth host>/application/o/netbird/` in the dashboard (Identity Providers).
+4. The Dex connector stores its own `redirectURI` in `idp.db`; update it with the server **stopped**, after a backup:
+   ```
+   sudo systemctl stop netbird-server
+   sudo podman volume export netbird-data > netbird-data-backup.tar
+   sudo podman run --rm --user 0 -v netbird-data:/d docker.io/keinos/sqlite3:latest sqlite3 /d/idp.db "update connector set config = cast(json_set(cast(config as text), '$.redirectURI', 'https://<new host>/oauth2/callback') as blob) where id = '<connector id>';"
+   sudo systemctl start netbird-server
+   ```
+   (`<connector id>`: `sqlite3 /d/idp.db "select id from connector;"` the same way.) Editing the IdP in the dashboard also needs a `netbird-server` restart to take effect.
 
 ## Security note
 

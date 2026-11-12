@@ -87,7 +87,7 @@ and exist as `apps/<name>/`, or the build fails. The line must be a single-line 
    drawn before the key existed). `scripts/node-key.sh <user>@<host>` fetches it over SSH for a node you can reach.
 3. `scripts/add-node.sh coke <key>` (registers it as a recipient).
 4. Give coke a NetBird setup key so it joins the mesh: `secrets/coke/netbird.env.sops`, same recipe as for ecstasy ([Secrets](#secrets-sops--age)).
-5. Create the Authentik secrets as in [`apps/authentik/README.md`](apps/authentik/README.md). Authentik's name is `auth.service.veronoi.cc` (covered by the `*.service` wildcard); `auth.veronoi.cc` is kept temporarily until the NetBird connector issuer is switched, its DNS points at ecstasy, not coke.
+5. Create the Authentik secrets as in [`apps/authentik/README.md`](apps/authentik/README.md). Authentik's name is `auth.service.veronoi.cc` (covered by the `*.service` wildcard).
 
 ## Secrets (SOPS + age)
 
@@ -262,7 +262,7 @@ copy left on a node by an older `apps-sync` is removed quietly. Every other regu
 
 ## Self-hosted NetBird and Authentik
 
-NetBird control plane on ecstasy (`netbird.veronoi.cc`), Authentik on coke (`auth.service.veronoi.cc`, `auth.veronoi.cc` kept temporarily until the NetBird connector issuer is switched; no inbound ports, reached by ecstasy's
+NetBird control plane on ecstasy (`netbird.service.veronoi.cc`), Authentik on coke (`auth.service.veronoi.cc`; no inbound ports, reached by ecstasy's
 Traefik over the NetBird mesh), shared Traefik: all declarative, nothing app-specific outside `apps/`. Setup, DNS/firewall, recipes,
 order of steps, backup and security notes: [`apps/netbird/README.md`](apps/netbird/README.md),
 [`apps/authentik/README.md`](apps/authentik/README.md), [`apps/traefik/README.md`](apps/traefik/README.md).
@@ -281,7 +281,7 @@ Nodes installed before this carry the same line as a drop-in, to be recreated by
 # netavark masquerades packets with mark bit 0x2000 (nat POSTROUTING); the default NetBird marks 0x1bd2x contain it.
 Environment=NB_FWMARK_BASE=0x1000000
 ```
-then `sudo systemctl daemon-reload && sudo systemctl restart netbird.service`. Check: `curl https://netbird.veronoi.cc/?ipcheck=1`
+then `sudo systemctl daemon-reload && sudo systemctl restart netbird.service`. Check: `curl https://netbird.service.veronoi.cc/?ipcheck=1`
 on ecstasy shows the real client IP in Traefik's log, not `172.30.0.1`.
 
 ## Domain scheme
@@ -299,7 +299,7 @@ who asks. No extra component, only DNS records and Traefik `entryPoints`.
 | Where | Record | Value |
 |---|---|---|
 | Cloudflare (zone `veronoi.cc`, grey cloud, no AAAA) | `A *.service` | `176.65.149.212` |
-| Cloudflare | `A netbird`, `A auth` | `176.65.149.212` (exceptions, unchanged) |
+| Cloudflare | delete `A`/`CNAME` `netbird` and `auth` | no longer used: both hosts are under `*.service` |
 | NetBird dashboard, DNS -> Zones: custom zone `service.veronoi.cc` | `A *` | `100.127.17.6` |
 
 The NetBird zone only overrides names inside `service.veronoi.cc`; every other name keeps its public answer. The former
@@ -322,14 +322,16 @@ Example: Paperless, `paperless` on `[mesh]` plus `paperless-share` on `[websecur
 - **Private by default:** `mesh` is Traefik's default entrypoint (`asdefault`), so a router without `entryPoints` is private, never public.
   A test (`tests/test_apps.py`, `check_router`, `check_mesh_coverage`) fails on any router without an explicit `entryPoints` list, on `[websecure]`
   without a path restriction, on a service host without a full mesh router, on deeper subdomains (the wildcard covers one label) and on any
-  other host that is not an exception.
+  other host than `<x>.service.veronoi.cc`.
 - **Name resolution:** a mesh peer gets the mesh IP only if it uses NetBird DNS. The NetBird client on the nodes runs in a container and does not
   configure systemd-resolved, so the nodes (and peers with DNS management disabled) get the public answer and reach only the public part.
   The mesh IP is only reachable with the NetBird client running.
 - **Certificate:** one wildcard from Let's Encrypt via DNS-01 (Cloudflare), resolver `letsencrypt-dns`. Only the wildcard shows up in
   Certificate Transparency logs, never an individual service name. The Cloudflare token is sensitive: scope it to Zone `veronoi.cc`,
   permission Zone:DNS:Edit only (steps: [`apps/traefik/README.md`](apps/traefik/README.md)).
-- **Exceptions** keep their names and the TLS-ALPN resolver `letsencrypt`: `netbird.veronoi.cc` and `auth.veronoi.cc` (public, `[websecure]`, unchanged for now).
+- **No exceptions:** NetBird and Authentik live at `netbird.service.veronoi.cc` / `auth.service.veronoi.cc`, fully public (`[websecure, mesh]`) like any other service host.
+  NetBird peers resolve the management name past the NetBird zone (the client caches the address it connected with), so a peer keeps reaching
+  the server even though the zone answers the same name with the mesh IP.
 - **Real client IPs** in Traefik's log depend on the `NB_FWMARK_BASE` fix above (guarded by a test in `tests/test_build.py`); reachability does not.
 - **Availability:** Traefik's mesh listener needs `wt0`, so the unit is ordered after `netbird.service` and retried (like `authentik-server`);
   otherwise a reboot could leave Traefik down, public routes included.

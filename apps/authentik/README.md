@@ -2,20 +2,19 @@
 
 Authentik 2026.8 (server, worker, PostgreSQL; no Redis: upstream's 2026.8.5 compose has none) on **coke**
 (`apps: [authentik]` in `nodes/coke.yml`, `coke.node.veronoi.cc`, Fedora CoreOS, `/dev/vda`, 8 GB RAM or more). Public name:
-`auth.service.veronoi.cc` (public + mesh, wildcard certificate). `auth.veronoi.cc` is kept temporarily, only until the NetBird connector
-issuer is switched to `https://auth.service.veronoi.cc/application/o/netbird/`. Fully declarative: Quadlets, settings and a blueprint from `apps/authentik/` via `apps-sync`, secrets as
+`auth.service.veronoi.cc` (public + mesh, wildcard certificate). Fully declarative: Quadlets, settings and a blueprint from `apps/authentik/` via `apps-sync`, secrets as
 `secrets/coke/authentik.env.sops` via `secrets-sync`. Generic mechanics: root [README](../../README.md).
 
 ## Topology: coke accepts no inbound connections
 
 ```
-browser --443--> ecstasy (176.65.149.212): Traefik, TLS for auth.service.veronoi.cc (Let's Encrypt DNS wildcard; auth.veronoi.cc: TLS-ALPN, temporary)
+browser --443--> ecstasy (176.65.149.212): Traefik, TLS for auth.service.veronoi.cc (Let's Encrypt DNS wildcard)
                    |  http, over the NetBird mesh (100.64.0.0/10)
                    v
                  coke: authentik-server on <coke's mesh address>:9000  (nothing else listens for the outside)
 ```
 
-- DNS: `auth.service.veronoi.cc` is covered by the wildcard `A *.service` (no per-name step). The temporary name needs **A** record `auth.veronoi.cc` -> `176.65.149.212` (ecstasy), no AAAA. Ports `80/443` are ecstasy's, see the [Traefik README](../traefik/README.md).
+- DNS: `auth.service.veronoi.cc` is covered by the wildcard `A *.service` (no per-name step). Ports `80/443` are ecstasy's, see the [Traefik README](../traefik/README.md).
   coke needs no DNS record and no open port; its NetBird client connects outbound only (the relay handles NAT).
 - The route lives in [`apps/authentik-route`](../authentik-route/README.md) (only a `routes.yml`), deployed on ecstasy, so the Traefik app
   stays app-agnostic. Authentik itself never sees the internet.
@@ -66,12 +65,12 @@ and joins the mesh only after this; no login needed) and run `scripts/add-node.s
 | 5 | browser | Authentik initial setup `https://auth.service.veronoi.cc/if/flow/initial-setup/` (needs DNS and the route from steps 3 and 4). |
 | 6 | NetBird | Add Authentik as an identity provider: [`apps/netbird/README.md`](../netbird/README.md), "Login via Authentik". |
 
-DNS `auth.service.veronoi.cc` is the `*.service` wildcard; `auth.veronoi.cc` -> ecstasy (temporary name) before step 4 (otherwise ecstasy's Traefik cannot obtain the certificate yet and retries later).
+DNS `auth.service.veronoi.cc` is the `*.service` wildcard, nothing to create.
 
 ### 2. coke joins the mesh
 
 ```
-printf 'NB_SETUP_KEY=%s\nNB_MANAGEMENT_URL=https://netbird.veronoi.cc\n' '<key>' |
+printf 'NB_SETUP_KEY=%s\nNB_MANAGEMENT_URL=https://netbird.service.veronoi.cc\n' '<key>' |
   sops --encrypt --filename-override secrets/coke/netbird.env.sops \
     --input-type dotenv --output-type dotenv --output secrets/coke/netbird.env.sops /dev/stdin
 ```
@@ -126,10 +125,10 @@ URL is public). Create your own user, add a passkey/TOTP, and keep `akadmin` as 
 
 `netbird-blueprint.yaml` is applied by the worker (on start, on file change, and hourly): an OAuth2/OpenID provider `NetBird` (confidential,
 client id `netbird`, secret from the environment, signing key `authentik Self-signed Certificate` (RS256, Dex verifies via JWKS), scopes
-`openid email profile`, explicit-consent authorization flow, **strict** redirect URIs `https://netbird.veronoi.cc/oauth2/callback` and
-`https://netbird.veronoi.cc/oauth2/logout/callback`) and the application `netbird` (issuer
-`https://auth.veronoi.cc/application/o/netbird/`). No service account or token is needed: NetBird's embedded IdP manager does not call
-the Authentik API. Check: `https://auth.veronoi.cc/application/o/netbird/.well-known/openid-configuration` returns the issuer; the worker log
+`openid email profile`, explicit-consent authorization flow, **strict** redirect URIs `https://netbird.service.veronoi.cc/oauth2/callback` and
+`https://netbird.service.veronoi.cc/oauth2/logout/callback`) and the application `netbird` (issuer
+`https://auth.service.veronoi.cc/application/o/netbird/`). No service account or token is needed: NetBird's embedded IdP manager does not call
+the Authentik API. Check: `https://auth.service.veronoi.cc/application/o/netbird/.well-known/openid-configuration` returns the issuer; the worker log
 (`journalctl -u authentik-worker`) shows the blueprint applied; Admin -> Customization -> Blueprints lists `NetBird`.
 
 `paperless-blueprint.yaml` works the same way: provider `Paperless` (confidential, client id `paperless`, implicit consent, **strict** redirect URI
