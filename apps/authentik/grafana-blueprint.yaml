@@ -1,0 +1,45 @@
+# Authentik blueprint: OIDC provider + application for Grafana (docs: https://grafana.com/docs/grafana/latest/setup-grafana/configure-access/configure-authentication/generic-oauth/).
+# Mounted into the worker as /blueprints/custom/grafana.yaml; the client secret is read from the worker's environment
+# (secrets/coke/authentik-grafana.env.sops, AUTHENTIK_GRAFANA_CLIENT_SECRET). The same value is GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET
+# in secrets/coke/monitoring.env.sops. Grafana's settings are in apps/monitoring/settings.env.
+version: 1
+metadata:
+  name: Grafana
+entries:
+  - model: authentik_providers_oauth2.oauth2provider
+    id: grafana-provider
+    identifiers:
+      name: Grafana
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      client_type: confidential
+      client_id: grafana
+      client_secret: !Env AUTHENTIK_GRAFANA_CLIENT_SECRET
+      # Defaults to an empty list: without it every login fails "Invalid grant_type for provider".
+      grant_types: [authorization_code, refresh_token]
+      # Grafana's callback: <root_url>/login/generic_oauth. No logout entry is needed: signout_redirect_url sends the browser to
+      # the end-session endpoint without post_logout_redirect_uri.
+      redirect_uris:
+        - matching_mode: strict
+          url: https://grafana.service.veronoi.cc/login/generic_oauth
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+      # The `profile` scope carries preferred_username and the `groups` claim that Grafana's role_attribute_path reads.
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
+  - model: authentik_core.application
+    identifiers:
+      slug: grafana
+    attrs:
+      name: Grafana
+      provider: !KeyOf grafana-provider
+      meta_launch_url: https://grafana.service.veronoi.cc
+  # Only the group `authentik Admins` may use the application: with a binding present, everyone else is denied.
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !Find [authentik_core.application, [slug, grafana]]
+      order: 0
+    attrs:
+      group: !Find [authentik_core.group, [name, authentik Admins]]

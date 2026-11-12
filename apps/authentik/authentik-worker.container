@@ -4,10 +4,11 @@ Wants=network-online.target
 After=network-online.target authentik-postgres.service
 Requires=authentik-postgres.service
 RequiresMountsFor=/var/data
-# /var/data/secrets/authentik.env and authentik-paperless.env are rendered by secrets-sync (secrets/coke/*.env.sops); until both
-# exist the unit is skipped instead of crash-looping, and secrets-sync restarts it when either appears or changes.
+# /var/data/secrets/authentik.env, authentik-paperless.env and authentik-grafana.env are rendered by secrets-sync (secrets/coke/*.env.sops); until all
+# exist the unit is skipped instead of crash-looping, and secrets-sync restarts it when any appears or changes.
 ConditionPathExists=/var/data/secrets/authentik.env
 ConditionPathExists=/var/data/secrets/authentik-paperless.env
+ConditionPathExists=/var/data/secrets/authentik-grafana.env
 
 [Container]
 Image=ghcr.io/goauthentik/server:2026.8.5
@@ -20,6 +21,8 @@ EnvironmentFile=/var/data/secrets/authentik.env
 # AUTHENTIK_PAPERLESS_CLIENT_SECRET for the Paperless blueprint (secrets/coke/authentik-paperless.env.sops, see README.md).
 # Read by podman, not systemd: SELinux denies systemd (init_t) reading /var/data (var_t).
 EnvironmentFile=/var/data/secrets/authentik-paperless.env
+# AUTHENTIK_GRAFANA_CLIENT_SECRET for the Grafana blueprint (secrets/coke/authentik-grafana.env.sops, see apps/monitoring/README.md).
+EnvironmentFile=/var/data/secrets/authentik-grafana.env
 Volume=authentik-data.volume:/data
 Volume=authentik-certs.volume:/certs
 # Blueprint: declares the NetBird OIDC provider and application (README.md). The worker applies it; its client secret
@@ -27,6 +30,8 @@ Volume=authentik-certs.volume:/certs
 Volume=/etc/containers/systemd/apps/authentik/netbird-blueprint.yaml:/blueprints/custom/netbird.yaml:ro,z
 # Blueprint: declares the Paperless OIDC provider, application and its group binding; client secret via !Env (above).
 Volume=/etc/containers/systemd/apps/authentik/paperless-blueprint.yaml:/blueprints/custom/paperless.yaml:ro,z
+# Blueprint: declares the Grafana OIDC provider, application and its group binding; client secret via !Env (above).
+Volume=/etc/containers/systemd/apps/authentik/grafana-blueprint.yaml:/blueprints/custom/grafana.yaml:ro,z
 
 [Service]
 Restart=on-failure
