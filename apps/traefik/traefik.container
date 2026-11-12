@@ -1,22 +1,35 @@
 [Unit]
 Description=Traefik (shared reverse proxy, TLS via Let's Encrypt)
-Wants=network-online.target
-After=network-online.target
+Wants=network-online.target netbird.service
+# netbird.service is the baked NetBird client: the mesh interface (wt0) has to exist before the mesh listener can be bound to
+# the mesh address. Only ordered, not required; if the bind still fails the unit is retried (StartLimitIntervalSec, RestartSec).
+After=network-online.target netbird.service
 RequiresMountsFor=/var/data
+# Retry forever: after a reboot the mesh address appears some seconds after the client started. Without this a failed bind
+# would leave Traefik down, and with it every public route.
+StartLimitIntervalSec=0
 
 [Container]
 # v3.7.13+ is what NetBird's own getting-started.sh requires (aliasHeadersStrategy).
 Image=docker.io/library/traefik:v3.7.18
 ContainerName=traefik
 Network=traefik.network
-PublishPort=80:80
-PublishPort=443:443
+# Public entrypoints (web, websecure) only on the public IP, the private one (mesh) only on the mesh IP of this node (stable per
+# NetBird peer): no listener is ever on 0.0.0.0, so a private service cannot be served from the public interface.
+PublishPort=176.65.149.212:80:80
+PublishPort=176.65.149.212:443:443
+PublishPort=100.127.17.6:443:8443
+# The Cloudflare token for the DNS-01 resolver (CF_DNS_API_TOKEN, secrets/ecstasy/traefik.env.sops, see README.md): a name-only
+# --env copies it from the unit's environment (the EnvironmentFile below), so the file stays optional.
+PodmanArgs=--env CF_DNS_API_TOKEN
 # Routes: every app ships its own routes.yml (see README.md). The whole synced apps directory is mounted read-only and
 # the file provider reads it recursively, so this app never has to know which apps exist. No container socket.
 Volume=/etc/containers/systemd/apps:/etc/traefik/apps:ro,z
 Volume=traefik-letsencrypt.volume:/letsencrypt
 # Static config as flags (no static config file to misparse). Timeouts 0: long-lived gRPC/WebSocket streams (NetBird).
 # No ACME email on purpose (nothing personal in a public repo): expiry notice mails will not arrive, renewal is automatic.
+# `mesh` is the default entrypoint (asdefault): a router without entryPoints is private, never public. Public routers say
+# entryPoints: [websecure] explicitly (a test enforces explicit entryPoints everywhere).
 Exec=--log.level=INFO --accesslog=true \
   --providers.file.directory=/etc/traefik/apps \
   --entrypoints.web.address=:80 \
@@ -28,13 +41,25 @@ Exec=--log.level=INFO --accesslog=true \
   --entrypoints.websecure.transport.respondingtimeouts.readtimeout=0 \
   --entrypoints.websecure.transport.respondingtimeouts.writetimeout=0 \
   --entrypoints.websecure.transport.respondingtimeouts.idletimeout=0 \
+  --entrypoints.mesh.address=:8443 \
+  --entrypoints.mesh.asdefault=true \
+  --entrypoints.mesh.http.aliasheadersstrategy=delete \
+  --entrypoints.mesh.transport.respondingtimeouts.readtimeout=0 \
+  --entrypoints.mesh.transport.respondingtimeouts.writetimeout=0 \
+  --entrypoints.mesh.transport.respondingtimeouts.idletimeout=0 \
   --serverstransport.forwardingtimeouts.responseheadertimeout=0s \
   --serverstransport.forwardingtimeouts.idleconntimeout=0s \
   --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json \
-  --certificatesresolvers.letsencrypt.acme.tlschallenge=true
+  --certificatesresolvers.letsencrypt.acme.tlschallenge=true \
+  --certificatesresolvers.letsencrypt-dns.acme.storage=/letsencrypt/acme-dns.json \
+  --certificatesresolvers.letsencrypt-dns.acme.dnschallenge.provider=cloudflare \
+  --certificatesresolvers.letsencrypt-dns.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53
 
 [Service]
 Restart=on-failure
+RestartSec=10
+# Optional ("-"): Traefik starts before the Cloudflare token exists (the DNS resolver then fails only for service names).
+EnvironmentFile=-/var/data/secrets/traefik.env
 # apps-sync runs `systemctl reload traefik` after route files changed: the file provider only watches the top level of the
 # directory, not the app subdirectories, and Traefik rebuilds its configuration on SIGHUP.
 ExecReload=/usr/bin/podman kill --signal HUP traefik

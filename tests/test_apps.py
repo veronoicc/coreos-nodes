@@ -181,11 +181,25 @@ def traefik_flags():
     return dict(f[2:].split("=", 1) for f in exec_line.split() if f.startswith("--"))
 
 
+PUBLIC_IP, MESH_IP = "176.65.149.212", "100.127.17.6"  # ecstasy: ens18 and wt0 (the NetBird mesh address of the peer)
+SERVICE_ZONE = "service.veronoi.cc"
+PUBLIC_EXCEPTIONS = {"netbird.veronoi.cc", "auth.veronoi.cc"}  # public, keep their names, certificate via TLS-ALPN
+
+
 def test_traefik_static_config():
     t = parse_quadlet(APPS / "traefik" / "traefik.container")
     c = t["Container"]
-    assert set(c["PublishPort"]) == {"80:80", "443:443"} and c["Network"] == ["traefik.network"]
+    # public listeners only on the public IP, the mesh listener only on the mesh IP (never 0.0.0.0)
+    assert set(c["PublishPort"]) == {f"{PUBLIC_IP}:80:80", f"{PUBLIC_IP}:443:443", f"{MESH_IP}:443:8443"}
+    assert c["Network"] == ["traefik.network"]
     assert "ConditionPathExists" not in t["Unit"]  # runs on every node that serves HTTPS, not gated on a secret
+    # the mesh address only exists once the NetBird client is up: ordered after it, retried forever (like authentik-server)
+    assert "netbird.service" in t["Unit"]["Wants"][0].split() and "netbird.service" in t["Unit"]["After"][0].split()
+    assert t["Unit"]["StartLimitIntervalSec"] == ["0"] and t["Service"]["Restart"] == ["on-failure"]
+    assert t["Service"]["RestartSec"] == ["10"]
+    # the Cloudflare token is optional (Traefik starts without it) and only handed to the container by name
+    assert t["Service"]["EnvironmentFile"] == ["-/var/data/secrets/traefik.env"]
+    assert c["PodmanArgs"] == ["--env CF_DNS_API_TOKEN"] and "EnvironmentFile" not in c
     assert "traefik-letsencrypt.volume:/letsencrypt" in c["Volume"]
     assert "/etc/containers/systemd/apps:/etc/traefik/apps:ro,z" in c["Volume"]
     assert t["Service"]["ExecReload"] == ["/usr/bin/podman kill --signal HUP traefik"]
@@ -195,10 +209,21 @@ def test_traefik_static_config():
     assert not any("email" in k for k in f), "no ACME email: nothing personal in a public repo"
     assert f["certificatesresolvers.letsencrypt.acme.storage"] == "/letsencrypt/acme.json"
     assert f["certificatesresolvers.letsencrypt.acme.tlschallenge"] == "true"
+    dns = "certificatesresolvers.letsencrypt-dns.acme."
+    assert f[dns + "storage"] == "/letsencrypt/acme-dns.json"  # not shared with the TLS-ALPN resolver
+    assert f[dns + "dnschallenge.provider"] == "cloudflare"
+    # public resolvers: the propagation check must not ask the NetBird zone that answers the same names privately
+    assert f[dns + "dnschallenge.resolvers"] == "1.1.1.1:53,8.8.8.8:53"
+    assert not any(k.startswith(dns) and "token" in k.lower() for k in f)  # the token is env only
     assert f["entrypoints.web.http.redirections.entrypoint.to"] == "websecure"
     assert f["entrypoints.web.address"] == ":80" and f["entrypoints.websecure.address"] == ":443"
-    for k in ("readtimeout", "writetimeout", "idletimeout"):
-        assert f[f"entrypoints.websecure.transport.respondingtimeouts.{k}"] == "0"
+    # the mesh entrypoint is the default: a router that forgets entryPoints is private, never public
+    assert f["entrypoints.mesh.address"] == ":8443" and f["entrypoints.mesh.asdefault"] == "true"
+    assert "entrypoints.websecure.asdefault" not in f
+    for ep in ("websecure", "mesh"):
+        assert f[f"entrypoints.{ep}.http.aliasheadersstrategy"] == "delete"
+        for k in ("readtimeout", "writetimeout", "idletimeout"):
+            assert f[f"entrypoints.{ep}.transport.respondingtimeouts.{k}"] == "0"
     for k in ("responseheadertimeout", "idleconntimeout"):
         assert f[f"serverstransport.forwardingtimeouts.{k}"] == "0s"
     assert not [p for p in (APPS / "traefik").iterdir() if p.suffix in ROUTE_EXT], "traefik ships no routes of its own"
@@ -206,6 +231,24 @@ def test_traefik_static_config():
 
 def test_traefik_network_unit():
     assert parse_quadlet(APPS / "traefik" / "traefik.network")["Network"]["Subnet"] == ["172.30.0.0/24"]
+
+
+def check_router(name, r):
+    """The domain scheme (README.md, Domain scheme). Every router names its entry points: `mesh` is Traefik's default, so a
+    forgotten entryPoints would still be private, but an explicit list is what a reviewer can read. Service names live
+    under service.veronoi.cc with the wildcard certificate; anything else must be a listed public exception."""
+    eps = r.get("entryPoints")
+    assert eps and set(eps) <= {"websecure", "mesh"} and len(set(eps)) == len(eps), f"{name}: entryPoints must be explicit"
+    hosts = re.findall(r"Host\(`([^`]+)`\)", r["rule"])
+    assert hosts, f"{name}: certificates are requested per Host rule"
+    assert len(set(hosts)) == 1 or all(h.endswith("." + SERVICE_ZONE) for h in hosts), f"{name}: mixed hosts"
+    for h in hosts:
+        if h.endswith("." + SERVICE_ZONE):
+            assert "." not in h[: -len(SERVICE_ZONE) - 1], f"{name}: {h} is not covered by *.{SERVICE_ZONE}"
+            assert r["tls"] == {"certResolver": "letsencrypt-dns", "domains": [{"main": f"*.{SERVICE_ZONE}"}]}, name
+        else:  # a name outside the scheme is public by definition: it cannot resolve on the mesh zone
+            assert h in PUBLIC_EXCEPTIONS, f"{name}: {h} is neither *.{SERVICE_ZONE} nor a public exception"
+            assert eps == ["websecure"] and r["tls"] == {"certResolver": "letsencrypt"}, name
 
 
 def route_files(node):
@@ -234,8 +277,7 @@ def test_everything_traefik_reads_on_a_node_is_a_valid_route_file(node):
         for n, r in http.get("routers", {}).items():
             assert n not in routers, f"router {n} defined twice"
             routers[n] = r
-            assert r["entryPoints"] == ["websecure"] and r["tls"]["certResolver"] == "letsencrypt", n
-            assert "Host(`" in r["rule"], f"{n}: certificates are requested per Host rule"
+            check_router(n, r)
         for n, s in http.get("services", {}).items():
             assert n not in services, f"service {n} defined twice"
             services[n] = s

@@ -266,6 +266,39 @@ Environment=NB_FWMARK_BASE=0x1000000
 then `sudo systemctl daemon-reload && sudo systemctl restart netbird.service`. Check: `curl https://netbird.veronoi.cc/?ipcheck=1`
 on ecstasy shows the real client IP in Traefik's log, not `172.30.0.1`.
 
+## Domain scheme (services: public, mesh-only or both)
+
+Services live at `<x>.service.veronoi.cc`. Each is **public**, **mesh-only** or **both**; that is only two things, no extra component:
+which Traefik entrypoint serves it and whether Cloudflare has a record for it.
+
+| | Traefik `entryPoints` | Cloudflare record | NetBird zone record |
+|---|---|---|---|
+| mesh-only | `[mesh]` | none | `<x>` -> `100.127.17.6` |
+| public | `[websecure]` | `A <x>.service` -> `176.65.149.212` (grey cloud, no AAAA) | `<x>` -> `100.127.17.6` |
+| both | `[websecure, mesh]` | as public | `<x>` -> `100.127.17.6` |
+
+- **Entrypoints** (ecstasy, `apps/traefik`): `websecure` (and the `web` redirect) listens only on the public IP `176.65.149.212`; `mesh`
+  listens only on the mesh IP `100.127.17.6:443`. A mesh-only name has no public DNS record and Traefik does not serve it on the public
+  entrypoint, so it is refused from outside even for someone who sets the address by hand.
+- **Private by default:** `mesh` is Traefik's default entrypoint (`asdefault`), so a router without `entryPoints` is private, never public.
+  A test (`tests/test_apps.py`) additionally fails on any router without an explicit `entryPoints` list.
+- **Mesh name resolution:** private names resolve only through a NetBird **custom DNS zone** `service.veronoi.cc` (dashboard: DNS -> Zones,
+  distributed to all peers) with one **A record per service**, all pointing to `100.127.17.6`. Public services get a record too: whether
+  NetBird falls back to public DNS for a name missing from a zone is unverified, and a record keeps peers on the mesh path. Note: the
+  NetBird client on the nodes runs in a container and does not configure systemd-resolved (`resolvectl` shows no DNS on `wt0` on coke), so
+  mesh names do **not** resolve on the nodes themselves; client devices (laptop, phone) are what matters.
+- **Certificate:** one wildcard `*.service.veronoi.cc` from Let's Encrypt via DNS-01 (Cloudflare), resolver `letsencrypt-dns`. Only the
+  wildcard shows up in Certificate Transparency logs, never an individual (private) service name, and no public record is needed to get it.
+  The Cloudflare token is sensitive: scope it to Zone `veronoi.cc`, permission Zone:DNS:Edit only (steps: [`apps/traefik/README.md`](apps/traefik/README.md)).
+- **Exceptions** keep their names and the TLS-ALPN resolver `letsencrypt`: `netbird.veronoi.cc` and `auth.veronoi.cc` (public, unchanged).
+- **Real client IPs** in Traefik's log depend on the `NB_FWMARK_BASE` fix above (guarded by a test in `tests/test_build.py`); reachability does not.
+- **Availability:** Traefik's mesh listener needs `wt0`, so the unit is ordered after `netbird.service` and retried (like `authentik-server`);
+  otherwise a reboot could leave Traefik down, public routes included.
+
+**Add a service:** in the app's `routes.yml` add a router with `rule: Host(`<x>.service.veronoi.cc`)`, `entryPoints: [mesh]` (or
+`[websecure, mesh]`), `tls: {certResolver: letsencrypt-dns, domains: [{main: "*.service.veronoi.cc"}]}`; then (your steps, not in git) add the
+NetBird zone record `<x>` -> `100.127.17.6` and, if public, the Cloudflare `A` record. A test rejects other hosts, resolvers and missing `entryPoints`.
+
 ## Change users (reinstall, keep data)
 
 Ignition only runs on first boot, so changing `users` in `config.yml` means rebuilding the OS.
