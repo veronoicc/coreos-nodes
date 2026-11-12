@@ -210,6 +210,13 @@ It never touches `netbird.container` or anything outside that directory. `reset`
 After a run that deployed or removed a `.yml`/`.yaml`/`.toml` file (Traefik route files), `apps-sync` runs `systemctl reload traefik.service`
 (failure or no Traefik on the node is ignored), because Traefik's directory watcher does not see changes in subdirectories.
 
+**Routes follow the app they route to.** On a node whose resolved list contains `traefik`, `apps-sync` also deploys `apps/<app>/routes.yml`
+(`routes.yml|yaml|toml`) of every app listed on **any** node (all `nodes/*.yml` of the downloaded copy, same parser; a malformed node file aborts the run
+before anything changes) into `/etc/containers/systemd/apps/<app>/`, with **only the route files** there: no Quadlets, env files or
+blueprints, no `daemon-reload` or unit start for them, only the `traefik` reload. Such a route-only dir is not an app of this node: `reset <app>`
+is refused ("not in APPS_LIST"), and it is removed like any removed file (reload included) once no node lists the app or the repo drops the file.
+An app that the node also lists is deployed in full as before.
+
 **Which apps a node runs** is read from the repo on every sync: the `apps:` line of `nodes/<node>.yml` in the downloaded copy
 (`<node>` = short hostname, as for `secrets-sync`). Adding an app there and pushing deploys it on the next run, no reinstall, no hand edit.
 Precedence: an `APPS_LIST` set in the environment of a manual run wins (under systemd the unit's `EnvironmentFile=` also sets it, so there it
@@ -220,13 +227,23 @@ Only a single-line flow list is understood, because the node has no YAML parser:
 changing anything on a malformed, missing or repeated line, so a typo never removes every app.
 
 **Nodes installed before this change** keep running their old `/usr/local/bin/apps-sync`, which only knows the baked list, until they get the new
-script: reinstall, or copy it by hand (after the change is on `main`; the node's own `/etc/apps-sync.env` stays as it is):
+script: reinstall, or copy it by hand (after the change is on `main`; the node's own `/etc/apps-sync.env` stays as it is). **The routes-in-apps
+change needs the new script on the Traefik node** (ecstasy) *before* the first sync of the new repo state, see the deploy order below. The same
+commands, pinned to a commit instead of `main`:
 
 ```
-ssh <node> 'curl -fsSL https://raw.githubusercontent.com/veronoicc/coreos-nodes/main/files/apps-sync -o /tmp/apps-sync \
+ssh <node> 'curl -fsSL https://raw.githubusercontent.com/veronoicc/coreos-nodes/<commit>/files/apps-sync -o /tmp/apps-sync \
   && sudo install -m 0755 -o root -g root -Z /tmp/apps-sync /usr/local/bin/apps-sync && rm /tmp/apps-sync \
   && sudo restorecon -v /usr/local/bin/apps-sync && sudo systemctl start apps-sync && journalctl -u apps-sync -n 20 --no-pager'
 ```
+
+**Deploy order for routes in apps** (moving `authentik-route`/`paperless-route` into their apps): (1) **before merging to `main`**, install the new
+`apps-sync` from the feature commit on ecstasy with the command above: against the old repo state it changes nothing; (2) the same on coke
+(it then deploys the new `routes.yml` next to its units, which restarts that app's containers once, like any changed plain file there);
+(3) merge to `main`. The next sync on ecstasy (timer, or `sudo systemctl start apps-sync`) deploys `authentik/routes.yml` and
+`paperless/routes.yml` as route-only dirs, removes the old `authentik-route`/`paperless-route` dirs (no longer listed anywhere) and reloads
+Traefik once, after both steps: Traefik never sees the old and new route twice and no route is missing. An old `apps-sync` on ecstasy would
+remove the old dirs and deploy nothing, so a route would disappear until the new script is installed.
 
 To wipe an app's state (stop, `podman rm -f` its container, `podman network rm` its `.network` networks, `podman volume rm` its `.volume` volumes, redeploy, start):
 
@@ -268,7 +285,7 @@ order of steps, backup and security notes: [`apps/netbird/README.md`](apps/netbi
 [`apps/authentik/README.md`](apps/authentik/README.md), [`apps/traefik/README.md`](apps/traefik/README.md).
 The NetBird *client* (`netbird.container`, `NB_SETUP_KEY` from `secrets/<node>/netbird.env.sops`) is baked into the Ignition and is not an app.
 Paperless-ngx on coke (`paperless.service.veronoi.cc`, mesh only except public `/share/` links, login only via Authentik) is a service of the [domain scheme](#domain-scheme):
-[`apps/paperless/README.md`](apps/paperless/README.md) (setup order, first superuser, backup) and [`apps/paperless-route`](apps/paperless-route/README.md) (ecstasy's route).
+[`apps/paperless/README.md`](apps/paperless/README.md) (setup order, first superuser, backup, route).
 
 **Client fwmark fix (masquerade collision).** NetBird's default fwmark (`0x1bd21`/`0x1bd22`) has bit `0x2000` set, and netavark's
 hostport rule `meta mark & 0x2000 == 0x2000 masquerade` matched it: every connection DNATed to a published container port (Traefik on
@@ -315,7 +332,11 @@ The NetBird zone only overrides names inside `service.veronoi.cc`; every other n
 
 Every service host additionally needs one router whose `entryPoints` include `mesh` and whose rule has no path restriction, because mesh
 peers resolve the name to the mesh entrypoint and must get the full service (a path-limited public router is a second router next to it).
-Example: Paperless, `paperless` on `[mesh]` plus `paperless-share` on `[websecure]` for `/share/` ([`apps/paperless-route`](apps/paperless-route/README.md)).
+Example: Paperless, `paperless` on `[mesh]` plus `paperless-share` on `[websecure]` for `/share/` ([`apps/paperless/routes.yml`](apps/paperless/README.md)).
+
+**Add a service:** one app directory `apps/<app>/` with the Quadlets and a `routes.yml` (routers named `<app>...`, shapes above), and list
+`<app>` in `apps:` of the node that runs it. The node that runs Traefik picks the route up automatically (see "Apps from git"); no DNS step,
+no change to the Traefik node's `apps:`.
 
 - **Entrypoints** (ecstasy, `apps/traefik`): `websecure` (and the `web` redirect) listens only on the public IP `176.65.149.212`; `mesh`
   listens only on the mesh IP `100.127.17.6:443`.

@@ -21,8 +21,10 @@ the domain scheme (split DNS, router shapes): root README, Domain scheme.
    with the app name (names are global across `routes.yml` files).
 2. If the backend is a container on this node, the app joins the shared network (`Network=traefik.network`) and the route uses its
    `ContainerName` as host. If the backend is elsewhere (for example Authentik on coke, reached over the NetBird mesh), the route
-   uses its address; see [`apps/authentik-route`](../authentik-route/README.md).
-3. Add the app to the node's `apps:` list. `apps-sync` deploys `/etc/containers/systemd/apps/<app>/routes.yml`.
+   uses its address; see [`apps/authentik`](../authentik/README.md).
+3. Add the app to the `apps:` list of the node that runs it. The route belongs to the app, not to the Traefik node: `apps-sync` on a node
+   that runs Traefik deploys `/etc/containers/systemd/apps/<app>/routes.yml` for **every app listed on any node** (`nodes/*.yml`), only the
+   route file for apps of other nodes, no Quadlets, no units. Nothing to add on the Traefik node.
 
 Certificates are requested only for routers that exist: an app that is not deployed on the node contributes no router and so no
 certificate request. Traefik itself is not gated on any secret, so a route of an app whose containers are still gated (for example NetBird
@@ -34,11 +36,13 @@ Traefik's file provider in `directory` mode parses **every** `.yml`, `.yaml` and
 (verified in Traefik v3.7.14 `pkg/provider/file/file.go`, `collectFileConfigs`), renders each as a Go template and aborts the
 whole configuration on the first file that does not parse. Apps contain other YAML (Authentik blueprint), so:
 
-- The mounted directory is `/etc/containers/systemd/apps`, i.e. only the apps **deployed on this node** (`apps-sync` removes the rest).
-- A repo test (`tests/test_apps.py`) renders, for every node that lists `traefik`, the set of files Traefik would read from its apps and
+- The mounted directory is `/etc/containers/systemd/apps`, i.e. only the apps **deployed on this node** plus the **route-only dirs**
+  (`apps/<app>/routes.yml` and nothing else) `apps-sync` adds for the apps of other nodes (removed again when no node lists the app).
+- A repo test (`tests/test_apps.py`) renders, for every node that lists `traefik`, the set of files Traefik would read from its apps (all
+  route-extension files of its own apps, `routes.yml` of every other listed app) and
   requires each to be a valid dynamic config named `routes.yml` (top-level keys only `http`/`tcp`/`udp`/`tls`, no `{{`, router and
   service names unique, every router has an existing service). The Authentik blueprint is
-  provably *not* one, and a test enforces that `authentik` is never on a node with `traefik`.
+  provably *not* one, and a test enforces that `authentik` is never on a node with `traefik` (it would be deployed there in full).
 - **Router guard** (same test, `check_router`): every router sets `entryPoints` explicitly (a subset of `websecure`/`mesh`) and has a `Host(...)` rule;
   a host directly under `service.veronoi.cc` must be `[mesh]`, `[websecure, mesh]`, or `[websecure]` with a `PathPrefix(`/`Path(` in the rule,
   with the `*.service.veronoi.cc` wildcard and `letsencrypt-dns`; every service host also needs a mesh router without path restriction; deeper
