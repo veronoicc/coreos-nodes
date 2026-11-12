@@ -1,7 +1,7 @@
 # Authentik (identity provider for NetBird login)
 
 Authentik 2026.8 (server, worker, PostgreSQL; no Redis: upstream's 2026.8.5 compose has none) on **coke**
-(`apps: [authentik]` in `nodes/coke.yml`, `coke.node.veronoi.cc`, Fedora CoreOS, `/dev/vda`, 8 GB RAM or more). Public name:
+(`apps: [authentik, paperless]` in `nodes/coke.yml`, `coke.node.veronoi.cc`, Fedora CoreOS, `/dev/vda`, 8 GB RAM or more). Public name:
 `auth.service.veronoi.cc` (public + mesh, wildcard certificate). Fully declarative: Quadlets, settings and a blueprint from `apps/authentik/` via `apps-sync`, secrets as
 `secrets/coke/authentik.env.sops` via `secrets-sync`. Generic mechanics: root [README](../../README.md).
 
@@ -16,8 +16,9 @@ browser --443--> ecstasy (176.65.149.212): Traefik, TLS for auth.service.veronoi
 
 - DNS: `auth.service.veronoi.cc` is covered by the wildcard `A *.service` (no per-name step). Ports `80/443` are ecstasy's, see the [Traefik README](../traefik/README.md).
   coke needs no DNS record and no open port; its NetBird client connects outbound only (the relay handles NAT).
-- The route lives in [`apps/authentik-route`](../authentik-route/README.md) (only a `routes.yml`), deployed on ecstasy, so the Traefik app
-  stays app-agnostic. Authentik itself never sees the internet.
+- The route is [`routes.yml`](routes.yml) in this app dir (`http://<coke mesh address>:9000` must equal the `PublishPort` address in
+  `authentik-server.container`; a test checks it). apps-sync deploys it on coke and, because Traefik runs on ecstasy, on ecstasy (route
+  file only, no unit; root README, Apps from git), so the Traefik app stays app-agnostic. Authentik itself never sees the internet.
 - **Authentik is published only on coke's mesh address** (`PublishPort=<mesh ip>:9000:9000` in `authentik-server.container`), never on
   `0.0.0.0`. Even if coke later gets a public IP or a port forward, Authentik is not reachable there. The address is not a secret.
   PostgreSQL and the worker publish nothing and live on the private `authentik.network`.
@@ -84,7 +85,7 @@ again). Write it into **both** files (they contain the same placeholder `100.64.
 a `100.64.0.0/10` address):
 
 - `apps/authentik/authentik-server.container`: `PublishPort=100.x.y.z:9000:9000`
-- `apps/authentik-route/routes.yml`: `url: http://100.x.y.z:9000`
+- `apps/authentik/routes.yml`: `url: http://100.x.y.z:9000`
 
 Push. Until then `authentik-server` cannot bind the placeholder and is retried every 10 s (nothing is exposed). A NetBird DNS name was
 not used because name resolution inside the Traefik container is not guaranteed to go through the mesh resolver, an address is.

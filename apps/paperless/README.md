@@ -14,14 +14,29 @@ browser/app --443--> ecstasy: Traefik `mesh` (100.127.17.6; whole app, mesh peer
                             coke: paperless on 100.127.197.215:8000  (nothing else listens for the outside)
 ```
 
-- The route lives in [`apps/paperless-route`](../paperless-route/README.md) (only a `routes.yml`), deployed on ecstasy.
+- The route is [`routes.yml`](routes.yml) in this app dir: apps-sync deploys it on coke (a no-op for Traefik, nothing reads it there) and,
+  because Traefik runs on ecstasy, on ecstasy too (root README, Apps from git). Only the route file goes there, no unit of Paperless.
 - **Paperless is published only on coke's mesh address** (`PublishPort=100.127.197.215:8000:8000`), never on `0.0.0.0`. The address
-  is not a secret and is the same as in `apps/paperless-route/routes.yml` (a test checks they match). Like `authentik-server`, the unit
+  is not a secret and is the same as the backend in `routes.yml` (`http://100.127.197.215:8000`; a test checks they match). Like `authentik-server`, the unit
   is ordered after the baked `netbird.service` and retried forever until the mesh interface exists.
 - Valkey and Paperless live on the private `paperless.network`; Valkey publishes nothing.
 - `settings.env` trusts exactly ecstasy's mesh IP (`PAPERLESS_TRUSTED_PROXIES=100.127.17.6`, the source of published-port traffic since
   the `NB_FWMARK_BASE` fix) for `X-Forwarded-*`: Django then builds `https://paperless.service.veronoi.cc/...` URLs, which the OIDC
   callback needs.
+
+## Route (`routes.yml`)
+
+The [Traefik](../traefik/README.md) route for `paperless.service.veronoi.cc` to Paperless on coke over the NetBird mesh. It uses the
+split-DNS scheme (root README, Domain scheme) and the wildcard `*.service.veronoi.cc` certificate (`letsencrypt-dns`), no per-service DNS
+step. Two routers:
+
+- `paperless`: `Host(paperless.service.veronoi.cc)` on `entryPoints: [mesh]`. Mesh peers resolve the name to ecstasy's mesh IP and get the whole app.
+- `paperless-share`: `Host(...) && PathPrefix(/share/)` on `entryPoints: [websecure]`. The internet gets only share links. Verified against
+  paperless-ngx v3.4.2: the route is `^share/(?P<slug>\w+)/?$` (`src/paperless/urls.py:301`, `SharedLinkView` in `src/documents/views.py`), which
+  needs no authentication and returns the file itself, so no static assets or other path are required. Expired or unknown links redirect to
+  `/accounts/login/?sharelink_*`, which is intentionally not served publicly (Traefik answers 404). `/admin`, the API and the UI are mesh-only.
+
+A test checks that `paperless-share` is the only `websecure` router and that its rule is exactly this one.
 
 | File | Content |
 |---|---|
@@ -47,7 +62,7 @@ session too (`PAPERLESS_LOGOUT_REDIRECT_URL` -> `.../application/o/paperless/end
 
 Note: `PAPERLESS_DISABLE_REGULAR_LOGIN` does not disable the Django admin login (`/admin/`) nor API login with local credentials. Both only
 work for a user with a local password, and SSO users have none. They are not reachable from the internet at all: the public router only serves `/share/`
-(`paperless-share` in [`apps/paperless-route`](../paperless-route/README.md)).
+(`paperless-share` in `routes.yml`, below).
 
 **Mobile apps and API clients** need the mesh (NetBird running with NetBird DNS, so the name resolves to the mesh IP) and cannot do the browser SSO flow: create an API token in Paperless (My Profile -> API token)
 and enter it in the app instead of a password (`Authorization: Token <token>`).

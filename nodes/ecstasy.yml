@@ -10,8 +10,9 @@ device: /dev/sda
 # (config.yml) + boot area + minimum data partition do not fit.
 disk_gib: 20
 
-# Apps from apps/ this node runs (everything else is removed; empty or missing = no apps).
-apps: [traefik, netbird, authentik-route, paperless-route]
+# Apps from apps/ this node runs (everything else is removed; empty or missing = no apps). Traefik also deploys the
+# routes.yml of every app listed on any node (coke's authentik, paperless), see README "Apps from git".
+apps: [traefik, netbird]
 
 # Extra users on top of config.yml (same shape):
 # users:

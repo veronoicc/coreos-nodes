@@ -1,4 +1,4 @@
-"""The apps under apps/ (traefik, netbird, authentik, authentik-route, paperless) are declarative: lint the repo files.
+"""The apps under apps/ (traefik, netbird, authentik, paperless) are declarative: lint the repo files.
 
 Everything here runs without a VM. tests/test_smoke_qemu.py boots the real thing."""
 import ipaddress
@@ -69,8 +69,8 @@ def targets(node):
 
 
 def test_apps_and_node_lists():
-    assert {p.name for p in APPS.iterdir()} == {"traefik", "netbird", "authentik", "authentik-route", "paperless", "paperless-route"}
-    assert NODES == {"ecstasy": ["traefik", "netbird", "authentik-route", "paperless-route"], "coke": ["authentik", "paperless"]}
+    assert {p.name for p in APPS.iterdir()} == {"traefik", "netbird", "authentik", "paperless"}
+    assert NODES == {"ecstasy": ["traefik", "netbird"], "coke": ["authentik", "paperless"]}
     assert not (ROOT / "tests" / "test_netbird_backend.py").exists()
 
 
@@ -307,7 +307,12 @@ def test_every_service_host_has_a_full_mesh_router():
 
 
 def route_files(node):
-    return [p for app in NODES[node] for p in sorted((APPS / app).iterdir()) if p.suffix in ROUTE_EXT]
+    """What apps-sync leaves in Traefik's file-provider tree on `node`: every route-ext file of its own apps, plus only the
+    routes.yml of every app listed on any node (a route belongs to the app it routes to, wherever that runs)."""
+    own = NODES[node]
+    foreign = sorted({a for apps in NODES.values() for a in apps} - set(own))
+    return [p for app in own for p in sorted((APPS / app).iterdir()) if p.suffix in ROUTE_EXT] + [
+        APPS / app / "routes.yml" for app in foreign if (APPS / app / "routes.yml").exists()]
 
 
 def load_routes(p):
@@ -347,10 +352,12 @@ def test_foreign_yaml_is_never_on_a_traefik_node():
         if "traefik" in apps:
             for p in route_files(node):
                 load_routes(p)
-    # the blueprint is exactly such a foreign file: it is only legal because authentik is never on a traefik node
+    # the blueprint is exactly such a foreign file: legal only because authentik is never on a traefik node (on one,
+    # apps-sync would deploy only routes.yml of it, but listing it there would deploy the blueprint too)
     blueprint = APPS / "authentik" / "netbird-blueprint.yaml"
     assert blueprint.suffix in ROUTE_EXT
     assert not any("traefik" in apps and "authentik" in apps for apps in NODES.values())
+    assert blueprint not in route_files("ecstasy")
     with pytest.raises(AssertionError):
         load_routes(blueprint)
 
@@ -451,7 +458,7 @@ def test_authentik_is_published_on_the_mesh_address_only():
     for name in ("authentik-postgres", "authentik-worker"):
         assert "PublishPort" not in containers("authentik")[name]["Container"], name
     # the route on the node that owns the public IP points at the same address
-    route = load_routes(APPS / "authentik-route" / "routes.yml")["http"]
+    route = load_routes(APPS / "authentik" / "routes.yml")["http"]
     assert route["services"]["authentik"]["loadBalancer"]["servers"] == [{"url": f"http://{ip}:9000"}]
     assert set(route["routers"]) == {"authentik"}
     assert route["routers"]["authentik"]["rule"] == "Host(`auth.service.veronoi.cc`)"
@@ -586,7 +593,7 @@ def test_paperless_is_published_on_the_mesh_address_only():
 
 def test_paperless_route_is_mesh_only_except_the_share_link_and_points_at_the_published_address():
     ip = containers("paperless")["paperless"]["Container"]["PublishPort"][0].split(":")[0]
-    route = load_routes(APPS / "paperless-route" / "routes.yml")["http"]  # check_router runs on it via the ecstasy route test
+    route = load_routes(APPS / "paperless" / "routes.yml")["http"]  # check_router runs on it via the ecstasy route test
     assert route["services"]["paperless"]["loadBalancer"]["servers"] == [{"url": f"http://{ip}:8000"}]
     router = route["routers"]["paperless"]
     assert router["rule"] == "Host(`paperless.service.veronoi.cc`)" and router["entryPoints"] == ["mesh"]
@@ -597,7 +604,7 @@ def test_paperless_route_is_mesh_only_except_the_share_link_and_points_at_the_pu
     assert public["paperless-share"]["rule"] == "Host(`paperless.service.veronoi.cc`) && PathPrefix(`/share/`)"
     assert public["paperless-share"]["entryPoints"] == ["websecure"] and public["paperless-share"]["service"] == "paperless"
     assert "middlewares" not in route
-    assert "paperless-route" in NODES["ecstasy"] and "paperless-route" not in NODES["coke"]
+    assert "paperless" in NODES["coke"] and "paperless" not in NODES["ecstasy"]  # ecstasy's Traefik gets only its route
 
 
 def test_paperless_units_gated_on_the_rendered_secrets():

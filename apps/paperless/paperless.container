@@ -17,7 +17,7 @@ Image=ghcr.io/paperless-ngx/paperless-ngx:3.4.2
 ContainerName=paperless
 Network=paperless.network
 # Reachable ONLY on the mesh address of this node (stable per NetBird peer), never on 0.0.0.0, so a public interface
-# can never serve it. The same address is in apps/paperless-route/routes.yml; edit both if the peer is re-registered.
+# can never serve it. The same address is in apps/paperless/routes.yml; edit both if the peer is re-registered.
 PublishPort=100.127.197.215:8000:8000
 EnvironmentFile=/etc/containers/systemd/apps/paperless/settings.env
 EnvironmentFile=/var/data/secrets/paperless.env
