@@ -75,8 +75,8 @@ Create `nodes/<name>.yml` (copy `nodes/ecstasy.yml`, set `device`; add `network:
 `<name>.iso` and `<name>.ign` automatically (one matrix job per `nodes/*.yml`, published on the `latest` release and GitHub Pages).
 
 `apps: [traefik, ...]` lists the apps from `apps/` the node runs (see [Apps from git](#apps-from-git-no-reinstall)). Names must be unique
-and exist as `apps/<name>/`, or the build fails. A missing or empty `apps:` means the node runs **no apps**. The list is baked into the
-Ignition (`APPS_LIST` in `/etc/apps-sync.env`), so changing it needs a reinstall (below).
+and exist as `apps/<name>/`, or the build fails. The line must be a single-line flow list (`apps: [a, b]` or `apps: []`) and appear exactly once:
+`apps-sync` reads it from the repo on the node on every sync, so changing it needs no reinstall.
 
 **Bootstrap order for a new node, e.g. `coke` (Authentik, no inbound ports, reached over the NetBird mesh via ecstasy's Traefik):**
 
@@ -202,7 +202,7 @@ Add `apps/<name>/<file>.container|.volume|.network|...`, push to `main`, and lis
 sudo systemctl start apps-sync
 ```
 
-`apps-sync` downloads `<repo_url>/archive/refs/heads/<branch>.tar.gz`, copies the listed apps' files (`APPS_LIST`, except `README*`) into
+`apps-sync` downloads `<repo_url>/archive/refs/heads/<branch>.tar.gz`, copies the node's apps' files (list: see below; except `README*`) into
 `/etc/containers/systemd/apps/<name>/`, deletes managed files whose app/file is gone **or whose app is no longer listed** (stopping their
 units; **volumes are kept**), runs `daemon-reload`, and restarts only units whose files changed
 (a changed non-Quadlet file such as an env file restarts that app's containers). Unchanged apps are not restarted.
@@ -210,9 +210,23 @@ It never touches `netbird.container` or anything outside that directory. `reset`
 After a run that deployed or removed a `.yml`/`.yaml`/`.toml` file (Traefik route files), `apps-sync` runs `systemctl reload traefik.service`
 (failure or no Traefik on the node is ignored), because Traefik's directory watcher does not see changes in subdirectories.
 
-The per-node list is baked in: a node installed before `apps:` existed has an older `apps-sync` that deploys **every** app in the repo until
-it is reinstalled (ecstasy is reinstalled anyway). That is harmless for Authentik: its three units have
-`ConditionPathExists=/var/data/secrets/authentik.env`, a file only coke gets (from `secrets/coke/authentik.env.sops`), so they are skipped elsewhere.
+**Which apps a node runs** is read from the repo on every sync: the `apps:` line of `nodes/<node>.yml` in the downloaded copy
+(`<node>` = short hostname, as for `secrets-sync`). Adding an app there and pushing deploys it on the next run, no reinstall, no hand edit.
+Precedence: an `APPS_LIST` set in the environment of a manual run wins (under systemd the unit's `EnvironmentFile=` also sets it, so there it
+counts as the baked value and the repo wins); otherwise the repo's node file; if the repo has no node file, the `APPS_LIST` baked into
+`/etc/apps-sync.env` at install. `reset` uses the same resolved list.
+Only a single-line flow list is understood, because the node has no YAML parser: `apps: [a, b]` or `apps: []` (names `[a-z0-9-]`, separated by
+`, `, optional trailing `# comment`). `build.py` rejects any other shape (and a missing or repeated `apps:` line), and `apps-sync` aborts before
+changing anything on a malformed, missing or repeated line, so a typo never removes every app.
+
+**Nodes installed before this change** keep running their old `/usr/local/bin/apps-sync`, which only knows the baked list, until they get the new
+script: reinstall, or copy it by hand (after the change is on `main`; the node's own `/etc/apps-sync.env` stays as it is):
+
+```
+ssh <node> 'curl -fsSL https://raw.githubusercontent.com/veronoicc/coreos-nodes/main/files/apps-sync -o /tmp/apps-sync \
+  && sudo install -m 0755 -o root -g root -Z /tmp/apps-sync /usr/local/bin/apps-sync && rm /tmp/apps-sync \
+  && sudo restorecon -v /usr/local/bin/apps-sync && sudo systemctl start apps-sync && journalctl -u apps-sync -n 20 --no-pager'
+```
 
 To wipe an app's state (stop, `podman rm -f` its container, `podman network rm` its `.network` networks, `podman volume rm` its `.volume` volumes, redeploy, start):
 
@@ -228,14 +242,14 @@ A plain `apps-sync` run that deploys a changed `.network` file does **not** recr
 would take them down); after removing the network it `systemctl restart`s the unit to recreate it (a kept network is only started).
 Restarting the unit also restarts the active containers that require it.
 
-**Nodes that still run the old `apps-sync`** (until their next reinstall) do not read `/etc/apps-sync.env` themselves (only the systemd unit does), so
+**Nodes that still run an old `apps-sync`** do not read `/etc/apps-sync.env` themselves (only the systemd unit does), so
 the plain form fails with `APPS_REPO_URL is not set`. Use this form instead (same with `--include-persistent`):
 
 ```
 sudo bash -c 'set -a; . /etc/apps-sync.env; apps-sync reset <app>'
 ```
 
-After a reinstall the plain form works. The installed version also does not remove networks on `reset`: after changing a `Subnet=` do it by hand,
+With the current script the plain form works. An old script also does not remove networks on `reset`: after changing a `Subnet=` do it by hand,
 stop the app's units (`sudo systemctl stop <app units>`), `sudo podman network rm systemd-<name>`, then start them again.
 
 A `.volume` file containing the comment line `# apps-sync: keep` is **persistent**: `reset` keeps that volume (and prints
