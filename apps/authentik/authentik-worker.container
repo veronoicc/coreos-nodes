@@ -4,9 +4,10 @@ Wants=network-online.target
 After=network-online.target authentik-postgres.service
 Requires=authentik-postgres.service
 RequiresMountsFor=/var/data
-# /var/data/secrets/authentik.env is rendered by secrets-sync (secrets/coke/authentik.env.sops); until then the unit is skipped
-# instead of crash-looping, and secrets-sync restarts all three Authentik units when it appears or changes.
+# /var/data/secrets/authentik.env and authentik-paperless.env are rendered by secrets-sync (secrets/coke/*.env.sops); until both
+# exist the unit is skipped instead of crash-looping, and secrets-sync restarts it when either appears or changes.
 ConditionPathExists=/var/data/secrets/authentik.env
+ConditionPathExists=/var/data/secrets/authentik-paperless.env
 
 [Container]
 Image=ghcr.io/goauthentik/server:2026.8.5
@@ -16,22 +17,19 @@ Network=authentik.network
 ShmSize=512m
 EnvironmentFile=/etc/containers/systemd/apps/authentik/settings.env
 EnvironmentFile=/var/data/secrets/authentik.env
+# AUTHENTIK_PAPERLESS_CLIENT_SECRET for the Paperless blueprint (secrets/coke/authentik-paperless.env.sops, see README.md).
+# Read by podman, not systemd: SELinux denies systemd (init_t) reading /var/data (var_t).
+EnvironmentFile=/var/data/secrets/authentik-paperless.env
 Volume=authentik-data.volume:/data
 Volume=authentik-certs.volume:/certs
 # Blueprint: declares the NetBird OIDC provider and application (README.md). The worker applies it; its client secret
 # comes from the rendered env file via !Env, nothing secret is in git. No container socket (no outposts).
 Volume=/etc/containers/systemd/apps/authentik/netbird-blueprint.yaml:/blueprints/custom/netbird.yaml:ro,z
-# Blueprint: declares the Paperless OIDC provider, application and its group binding. Its client secret is in the optional
-# authentik-paperless.env (below), forwarded by name only.
+# Blueprint: declares the Paperless OIDC provider, application and its group binding; client secret via !Env (above).
 Volume=/etc/containers/systemd/apps/authentik/paperless-blueprint.yaml:/blueprints/custom/paperless.yaml:ro,z
-# AUTHENTIK_PAPERLESS_CLIENT_SECRET (secrets/coke/authentik-paperless.env.sops, see README.md): a name-only --env copies it
-# from the unit's environment (the EnvironmentFile below), so the file stays optional and the worker does not depend on it.
-PodmanArgs=--env AUTHENTIK_PAPERLESS_CLIENT_SECRET
 
 [Service]
 Restart=on-failure
-# Optional ("-"): without the file only the Paperless blueprint fails (!Env finds no value), NetBird login and the rest keep working.
-EnvironmentFile=-/var/data/secrets/authentik-paperless.env
 
 [Install]
 WantedBy=multi-user.target

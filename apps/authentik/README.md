@@ -42,7 +42,7 @@ browser --443--> ecstasy (176.65.149.212): Traefik, TLS for auth.veronoi.cc (Let
 | `netbird-blueprint.yaml` | Declares the NetBird OIDC provider and application. Mounted into the worker as `/blueprints/custom/netbird.yaml`. |
 | `paperless-blueprint.yaml` | Declares the Paperless OIDC provider, application and its binding to the group `authentik Admins`. Mounted into the worker as `/blueprints/custom/paperless.yaml`. See [`apps/paperless/README.md`](../paperless/README.md). |
 | `/var/data/secrets/authentik.env` | secrets-sync, 0600 root: secret key, database password, NetBird client secret. |
-| `/var/data/secrets/authentik-paperless.env` | secrets-sync, 0600 root: `AUTHENTIK_PAPERLESS_CLIENT_SECRET` for the Paperless blueprint. Only the worker reads it, as an **optional** file (`EnvironmentFile=-` in `[Service]` plus `PodmanArgs=--env <name>`, the pattern of Traefik's token): no gate, and without it only the Paperless blueprint fails. Created together with `paperless.env.sops`, whose OIDC client config carries the same value. |
+| `/var/data/secrets/authentik-paperless.env` | secrets-sync, 0600 root: `AUTHENTIK_PAPERLESS_CLIENT_SECRET` for the Paperless blueprint. Only the worker reads it (`[Container] EnvironmentFile=`, read by podman; systemd may not read `/var/data` under SELinux) and is gated on it (`ConditionPathExists`), restarted by secrets-sync when it appears or changes. Created together with `paperless.env.sops`, whose OIDC client config carries the same value. |
 
 All three units have `ConditionPathExists=/var/data/secrets/authentik.env`: before the first render they are skipped, afterwards
 `secrets-sync` (re)starts them together when the file changes. A custom templates volume is not created (none used); add a

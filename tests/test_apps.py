@@ -153,6 +153,10 @@ def test_container_hygiene(app, name, q):
     assert not re.search(r"sock", "".join(c.get("Volume", [])))
     for env in c.get("EnvironmentFile", []):
         assert env.startswith((f"/etc/containers/systemd/apps/{app}/", "/var/data/secrets/")), env
+    # SELinux: systemd (init_t) may not read /var/data (var_t), so a [Service] EnvironmentFile there silently loads nothing
+    # (AVC denial). Podman reads [Container] EnvironmentFile itself, which works.
+    assert not [e for e in q.get("Service", {}).get("EnvironmentFile", []) if "/var/data/" in e]
+    assert "PodmanArgs" not in c or "--env" not in " ".join(c["PodmanArgs"])
 
 
 def test_images_pinned():
@@ -198,9 +202,8 @@ def test_traefik_static_config():
     assert "netbird.service" in t["Unit"]["Wants"][0].split() and "netbird.service" in t["Unit"]["After"][0].split()
     assert t["Unit"]["StartLimitIntervalSec"] == ["0"] and t["Service"]["Restart"] == ["on-failure"]
     assert t["Service"]["RestartSec"] == ["10"]
-    # the Cloudflare token is optional (Traefik starts without it) and only handed to the container by name
-    assert t["Service"]["EnvironmentFile"] == ["-/var/data/secrets/traefik.env"]
-    assert c["PodmanArgs"] == ["--env CF_DNS_API_TOKEN"] and "EnvironmentFile" not in c
+    # the Cloudflare token is read by podman ([Container]); a missing file fails the start, which is retried (above)
+    assert c["EnvironmentFile"] == ["/var/data/secrets/traefik.env"]
     assert "traefik-letsencrypt.volume:/letsencrypt" in c["Volume"]
     assert "/etc/containers/systemd/apps:/etc/traefik/apps:ro,z" in c["Volume"]
     assert t["Service"]["ExecReload"] == ["/usr/bin/podman kill --signal HUP traefik"]
@@ -361,8 +364,8 @@ def test_secrets_sync_targets_match_the_units():
         assert (d, mode, owner) == (dest, "0600", "root:root")
         assert set(restart.split(",")) == {f"{u}.service" for u in units}  # every gated unit is (re)started
         assert (ROOT / "secrets" / node / "targets.conf").exists()
-        for u in units:  # gate + file are the same path
-            assert parse_quadlet(APPS / app / f"{u}.container")["Unit"]["ConditionPathExists"] == [dest]
+        for u in units:  # the rendered file is one of the unit's gates (the worker is also gated on authentik-paperless.env)
+            assert dest in parse_quadlet(APPS / app / f"{u}.container")["Unit"]["ConditionPathExists"]
     for node in NODES:  # the baked client's setup key is rendered on both nodes
         line = next(l for l in targets(node) if l[0] == "netbird.env.sops")
         assert line[1] == NB_SECRETS and line[4] == "netbird.service"
@@ -475,8 +478,8 @@ def test_paperless_blueprint():
     assert envs == {"AUTHENTIK_PAPERLESS_CLIENT_SECRET"}
     worker = parse_quadlet(APPS / "authentik" / "authentik-worker.container")
     assert "paperless-blueprint.yaml:/blueprints/custom/paperless.yaml:ro,z" in "".join(worker["Container"]["Volume"])
-    assert worker["Service"]["EnvironmentFile"] == ["-/var/data/secrets/authentik-paperless.env"]  # optional: "-"
-    assert worker["Container"]["PodmanArgs"] == ["--env AUTHENTIK_PAPERLESS_CLIENT_SECRET"]
+    assert "/var/data/secrets/authentik-paperless.env" in worker["Container"]["EnvironmentFile"]
+    assert "/var/data/secrets/authentik-paperless.env" in worker["Unit"]["ConditionPathExists"]
     assert "AUTHENTIK_PAPERLESS" not in (APPS / "authentik" / "authentik-server.container").read_text()
     file, dest, mode, owner, restart = next(l for l in targets("coke") if l[0] == "authentik-paperless.env.sops")
     assert (dest, mode, owner, restart) == ("/var/data/secrets/authentik-paperless.env", "0600", "root:root", "authentik-worker.service")

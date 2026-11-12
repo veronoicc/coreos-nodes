@@ -93,8 +93,9 @@ read -rs -p 'Cloudflare token: ' t && echo && printf 'CF_DNS_API_TOKEN=%s\n' "$t
 ```
 
 Commit and push `secrets/ecstasy/traefik.env.sops`; `secrets-sync` renders `/var/data/secrets/traefik.env` (0600 root) and restarts
-`traefik.service`. Until then the file does not exist: Traefik starts anyway (`EnvironmentFile=-`), only certificate requests of the
-DNS resolver fail (`cloudflare: some credentials information are missing` in `journalctl -u traefik`).
+`traefik.service`. Until then the file does not exist and Traefik's start fails and is retried every 10 s (public routes too), so
+commit the token before the node needs Traefik. The file is a `[Container] EnvironmentFile=` (read by podman): a `[Service]`
+`EnvironmentFile=` would be read by systemd, which SELinux denies for `/var/data` (`var_t`), and the token would silently be empty.
 
 ## NetBird zone (your step, not in git)
 

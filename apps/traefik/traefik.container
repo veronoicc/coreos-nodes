@@ -19,9 +19,10 @@ Network=traefik.network
 PublishPort=176.65.149.212:80:80
 PublishPort=176.65.149.212:443:443
 PublishPort=100.127.17.6:443:8443
-# The Cloudflare token for the DNS-01 resolver (CF_DNS_API_TOKEN, secrets/ecstasy/traefik.env.sops, see README.md): a name-only
-# --env copies it from the unit's environment (the EnvironmentFile below), so the file stays optional.
-PodmanArgs=--env CF_DNS_API_TOKEN
+# The Cloudflare token for the DNS-01 resolver (CF_DNS_API_TOKEN, secrets/ecstasy/traefik.env.sops, see README.md). Read by
+# podman, not systemd: SELinux denies systemd (init_t) reading /var/data (var_t). Until secrets-sync rendered it the start
+# fails and is retried (RestartSec, StartLimitIntervalSec).
+EnvironmentFile=/var/data/secrets/traefik.env
 # Routes: every app ships its own routes.yml (see README.md). The whole synced apps directory is mounted read-only and
 # the file provider reads it recursively, so this app never has to know which apps exist. No container socket.
 Volume=/etc/containers/systemd/apps:/etc/traefik/apps:ro,z
@@ -58,8 +59,6 @@ Exec=--log.level=INFO --accesslog=true \
 [Service]
 Restart=on-failure
 RestartSec=10
-# Optional ("-"): Traefik starts before the Cloudflare token exists (the DNS resolver then fails only for service names).
-EnvironmentFile=-/var/data/secrets/traefik.env
 # apps-sync runs `systemctl reload traefik` after route files changed: the file provider only watches the top level of the
 # directory, not the app subdirectories, and Traefik rebuilds its configuration on SIGHUP.
 ExecReload=/usr/bin/podman kill --signal HUP traefik
