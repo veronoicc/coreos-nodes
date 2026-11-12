@@ -1,0 +1,37 @@
+# Traefik routes for grafana.service.veronoi.cc. Grafana runs on coke, which accepts no inbound connections: Traefik reaches it
+# over the NetBird mesh at coke's mesh address. TimescaleDB is not routed at all (mesh address, TCP 5432, see README.md).
+# `grafana` (mesh peers, who resolve the name to ecstasy's mesh IP): the whole app, mesh entrypoint only.
+# `grafana-public` (internet): only what an anonymous viewer needs for a public dashboard, verified against grafana v13.3.1:
+#   /public-dashboards/<accessToken>  the page: pkg/api/api.go:200 (inside `if PublicDashboardsEnabled`, :195; no sign-in middleware;
+#                                      /public-dashboards/list on :197 needs sign-in and is never served here)
+#   /api/public/dashboards/<token>/   view, /annotations, POST /panels/:panelId/query: pkg/services/publicdashboards/internal/api/api.go:77-81
+#                                      (Group with only the no-op HandleApi middleware); the frontend calls it from
+#                                      public/app/core/services/backend_srv.ts:688 and public/app/features/query/state/DashboardQueryRunner/PublicAnnotationsDataSource.ts:71
+#   /public/                           the JS/CSS/font/image bundle the page loads: pkg/api/http_server.go:703 (mapStatic public)
+#                                      and /public/plugins/<id>/ assets, pkg/api/api.go:265
+# Not needed: /bootdata/<token> (pkg/api/api.go:208) is not requested by the frontend (the boot data is inlined in the page).
+# MESH ADDRESS: the same address is in apps/monitoring/grafana.container (PublishPort); a test checks they match.
+# See apps/monitoring/README.md.
+http:
+  routers:
+    grafana:
+      rule: Host(`grafana.service.veronoi.cc`)
+      entryPoints: [mesh]
+      tls:
+        certResolver: letsencrypt-dns
+        domains:
+          - main: "*.service.veronoi.cc"
+      service: grafana
+    grafana-public:
+      rule: Host(`grafana.service.veronoi.cc`) && (PathPrefix(`/public-dashboards/`) || PathPrefix(`/api/public/dashboards/`) || PathPrefix(`/public/`))
+      entryPoints: [websecure]
+      tls:
+        certResolver: letsencrypt-dns
+        domains:
+          - main: "*.service.veronoi.cc"
+      service: grafana
+  services:
+    grafana:
+      loadBalancer:
+        servers:
+          - url: http://100.127.197.215:3000
