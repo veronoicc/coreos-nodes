@@ -28,11 +28,21 @@ class Env:
             p = self.bin / tool
             p.write_text(f'#!/bin/sh\necho "{tool} $*" >> "{self.log}"\n')
             p.chmod(0o755)
+        self.hostname = tmp / "hostname"
+        self.hostname.write_text("node1.node.example\n")  # FQDN like the real nodes; the node name is the short part
 
     def put(self, rel, text):
         p = self.src / "apps" / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text)
+
+    def put_node(self, apps_line):
+        p = self.src / "nodes" / "node1.yml"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f"# node1\n\n{apps_line}\n\nusers: []\n")
+
+    def drop_node(self):
+        (self.src / "nodes" / "node1.yml").unlink()
 
     def drop(self, rel):
         p = self.src / "apps" / rel
@@ -49,8 +59,10 @@ class Env:
         }
         if use_src:
             env["APPS_SRC_DIR"] = str(self.src)
+        env.pop("INVOCATION_ID", None)  # set when the developer's shell runs under a systemd service
         env.setdefault("APPS_LIST", "whoami db")
         env.setdefault("APPS_ENV_FILE", str(self.tmp / "no-such.env"))  # never read the developer's /etc/apps-sync.env
+        env.setdefault("APPS_HOSTNAME_FILE", str(self.hostname))  # the fixture repo has nodes/node1.yml
         env.update(extra_env or {})
         env = {k: v for k, v in env.items() if v is not None}  # extra_env value None = unset
         self.log.write_text("")
@@ -84,6 +96,7 @@ class Env:
 @pytest.fixture
 def env(tmp_path):
     e = Env(tmp_path)
+    e.put_node("apps: [whoami, db]")
     e.put("whoami/whoami.container", WHOAMI)
     e.put("db/db.container", DB_CONTAINER)
     e.put("db/dbdata.volume", DB_VOLUME)
@@ -265,6 +278,7 @@ def test_env_file_supplies_list_for_a_manual_reset(env):
 
 
 def test_env_file_supplies_list_and_repo_for_sync(env):
+    env.drop_node()  # no node file in the repo: the baked list is the fallback
     env.fake_curl()
     f = env.tmp / "apps-sync.env"
     f.write_text('APPS_REPO_URL=https://github.com/o/r/\nAPPS_BRANCH=feat\nAPPS_LIST="db"\n')
@@ -484,10 +498,11 @@ def test_empty_list_deploys_nothing_and_removes_deployed(env, value):
     assert not any(c.startswith("podman") for c in env.calls())
 
 
-def test_unset_list_deploys_nothing(env):
-    e = {k: v for k, v in os.environ.items() if k != "APPS_LIST"}
+def test_unset_list_and_no_node_file_deploys_nothing(env):
+    env.drop_node()
+    e = {k: v for k, v in os.environ.items() if k not in ("APPS_LIST", "INVOCATION_ID")}
     e.update(PATH=f"{env.bin}:{e['PATH']}", APPS_DIR=str(env.apps), APPS_LOCK=str(env.tmp / "lock"),
-             APPS_SRC_DIR=str(env.src), APPS_ENV_FILE=str(env.tmp / "no-such.env"))
+             APPS_SRC_DIR=str(env.src), APPS_ENV_FILE=str(env.tmp / "no-such.env"), APPS_HOSTNAME_FILE=str(env.hostname))
     r = subprocess.run(["bash", str(SCRIPT)], env=e, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert not env.apps.exists() or not any(env.apps.iterdir())
@@ -547,3 +562,140 @@ def test_reload_failure_is_ignored(env):
     )
     env.put("db/route.yml", ROUTE)
     env.run()
+
+
+# ---- the node's app list comes from nodes/<node>.yml in the downloaded repo
+
+
+def test_list_comes_from_repo_node_file(env):
+    env.put_node("apps: [db]")
+    env.run(extra_env={"APPS_LIST": None})
+    assert (env.apps / "db" / "db.container").exists() and not (env.apps / "whoami").exists()
+
+
+def test_repo_list_wins_over_baked_env_file_list(env):
+    f = env.tmp / "apps-sync.env"
+    f.write_text('APPS_LIST="whoami"\n')
+    env.put_node("apps: [db]")
+    env.run(extra_env={"APPS_LIST": None, "APPS_ENV_FILE": str(f)})
+    assert (env.apps / "db").exists() and not (env.apps / "whoami").exists()
+
+
+def test_systemd_unit_environment_list_is_the_baked_one_and_repo_wins(env):
+    # the installed unit's EnvironmentFile= puts the baked APPS_LIST into the environment; INVOCATION_ID marks a unit run
+    env.put_node("apps: [db]")
+    env.run(extra_env={"APPS_LIST": "whoami", "INVOCATION_ID": "abc"})
+    assert (env.apps / "db").exists() and not (env.apps / "whoami").exists()
+
+
+def test_systemd_unit_run_falls_back_to_baked_list_without_node_file(env):
+    env.drop_node()
+    f = env.tmp / "apps-sync.env"
+    f.write_text('APPS_LIST="whoami"\n')
+    env.run(extra_env={"APPS_LIST": "whoami", "INVOCATION_ID": "abc", "APPS_ENV_FILE": str(f)})
+    assert (env.apps / "whoami").exists() and not (env.apps / "db").exists()
+
+
+def test_explicit_environment_list_wins_over_repo_node_file(env):
+    env.put_node("apps: [whoami]")
+    env.run(extra_env={"APPS_LIST": "db"})
+    assert (env.apps / "db").exists() and not (env.apps / "whoami").exists()
+
+
+def test_node_name_is_the_short_hostname(env):
+    env.put_node("apps: [db]")
+    env.hostname.write_text("node1\n")
+    env.run(extra_env={"APPS_LIST": None})
+    assert (env.apps / "db").exists() and not (env.apps / "whoami").exists()
+
+
+def test_missing_node_file_falls_back_to_baked_list(env):
+    f = env.tmp / "apps-sync.env"
+    f.write_text('APPS_LIST="db"\n')
+    env.drop_node()
+    env.run(extra_env={"APPS_LIST": None, "APPS_ENV_FILE": str(f)})
+    assert (env.apps / "db").exists() and not (env.apps / "whoami").exists()
+
+
+def test_app_added_to_repo_node_file_is_deployed_on_the_next_sync(env):
+    env.put_node("apps: [whoami]")
+    env.run(extra_env={"APPS_LIST": None})
+    assert not (env.apps / "db").exists()
+    env.put_node("apps: [whoami, db]")
+    env.run(extra_env={"APPS_LIST": None})
+    assert (env.apps / "db" / "db.container").exists()
+    assert env.restarted() == {"db.service", "dbdata-volume.service"}
+
+
+def test_app_removed_from_repo_node_file_is_removed(env):
+    env.run(extra_env={"APPS_LIST": None})
+    env.put_node("apps: [whoami]")
+    env.run(extra_env={"APPS_LIST": None})
+    assert not (env.apps / "db").exists() and "systemctl stop db.service" in env.calls()
+
+
+@pytest.mark.parametrize("line", ["apps: []", "apps: [] # nothing", "apps: [db]   ", "apps: [whoami, db-2]"])
+def test_accepted_apps_lines(env, line):
+    env.put_node(line)
+    env.run(extra_env={"APPS_LIST": None})
+
+
+def test_empty_repo_list_removes_everything(env):
+    env.run(extra_env={"APPS_LIST": None})
+    env.put_node("apps: []")
+    env.run(extra_env={"APPS_LIST": None})
+    assert not (env.apps / "db").exists() and not (env.apps / "whoami").exists()
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "apps:",
+        "apps: db",
+        "apps: whoami, db",
+        "apps: [whoami, db",
+        "apps: [whoami db]",
+        "apps: [whoami,db]",
+        "apps: [Whoami]",
+        "apps: ['db']",
+        "apps: [db,]",
+        "apps: [../x]",
+        "apps: [db] junk",
+        "apps : [db]",
+        "apps: &x [db]",
+        "apps:\n  - db",
+        "apps: [db]\napps: []",
+        "appz: [db]",
+        "# apps: [db]",
+    ],
+)
+def test_malformed_apps_line_aborts_and_changes_nothing(env, line):
+    env.run(extra_env={"APPS_LIST": None})
+    before = sorted(p.relative_to(env.apps) for p in env.apps.rglob("*"))
+    env.put_node(line)
+    r = env.run(extra_env={"APPS_LIST": None}, check=False)
+    assert r.returncode != 0 and "apps" in r.stderr
+    assert sorted(p.relative_to(env.apps) for p in env.apps.rglob("*")) == before
+    assert env.calls() == []
+
+
+def test_malformed_repo_line_also_blocks_reset(env):
+    env.run(extra_env={"APPS_LIST": None})
+    env.put_node("apps: db")
+    r = env.run("reset", "db", extra_env={"APPS_LIST": None}, check=False)
+    assert r.returncode != 0 and env.calls() == []
+
+
+def test_malformed_repo_line_is_ignored_when_the_environment_sets_the_list(env):
+    env.put_node("apps: db")
+    env.run(extra_env={"APPS_LIST": "db"})
+    assert (env.apps / "db").exists()
+
+
+def test_reset_uses_the_repo_list(env):
+    env.put_node("apps: [db]")
+    env.run(extra_env={"APPS_LIST": None})
+    env.run("reset", "db", extra_env={"APPS_LIST": None})
+    assert "podman rm -f --ignore systemd-db" in env.calls()
+    r = env.run("reset", "whoami", extra_env={"APPS_LIST": None}, check=False)
+    assert r.returncode != 0 and "whoami" in r.stderr

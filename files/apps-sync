@@ -10,13 +10,28 @@
 #      itself for every one of them that is not already set in the environment (the environment wins).
 #      APPS_SRC_DIR (local repo root instead of downloading; for tests),
 #      APPS_DIR (managed dir), APPS_LOCK (lock file).
-# Only apps in APPS_LIST are deployed. A deployed app that is not listed (or not in the repo) is stopped and removed
-# like a removed app (volumes are never deleted). Empty or unset APPS_LIST = this node runs no apps.
+# Apps: precedence of the list of apps this node runs (the node name is the short hostname, APPS_HOSTNAME_FILE, default
+#   /etc/hostname, like secrets-sync):
+#   1. APPS_LIST set in the environment (manual runs, tests; may be empty = no apps), except under systemd, where the
+#      unit's EnvironmentFile= makes it the baked value;
+#   2. the `apps:` line of nodes/<node>.yml in the downloaded repo copy, read on every run. Only a single-line flow list
+#      is understood: `apps: [a, b]` or `apps: []` (names [a-z0-9-], ", " separated, optional trailing # comment). A
+#      missing, repeated or malformed line aborts the run before anything is changed (a typo never removes every app);
+#   3. no nodes/<node>.yml in the repo: the baked APPS_LIST from /etc/apps-sync.env; unset = no apps.
+# A deployed app that is not in the list (or not in the repo) is stopped and removed like a removed app (volumes are
+# never deleted). `reset` uses the same resolved list.
 # A deployed or removed *.yml|*.yaml|*.toml file (Traefik route files) triggers `systemctl reload traefik.service` after the
 # restarts: Traefik's directory watcher does not see changes in subdirectories. A failing or missing reload is ignored.
 set -euo pipefail
 
 APPS_ENV_FILE=${APPS_ENV_FILE:-/etc/apps-sync.env}
+APPS_HOSTNAME_FILE=${APPS_HOSTNAME_FILE:-/etc/hostname}
+# APPS_LIST set by the caller is final. Under systemd (INVOCATION_ID) the installed unit's EnvironmentFile= puts the baked
+# list there too: that one is only the fallback, so drop it and let load_env_file bring it back.
+APPS_LIST_FIXED=0
+if [ -n "${APPS_LIST+x}" ]; then
+    if [ -n "${INVOCATION_ID:-}" ]; then unset APPS_LIST; else APPS_LIST_FIXED=1; fi
+fi
 
 # load_env_file: set each of the three variables from the env file unless it is already set (even empty).
 load_env_file() {
@@ -258,12 +273,34 @@ parse_reset() {
     reset "$app" "$include"
 }
 
+# resolve_list: APPS_LIST = what this node runs, before anything is touched (see precedence in the header).
+resolve_list() {
+    [ "$APPS_LIST_FIXED" -eq 0 ] || return 0
+    local f n line list='' count=0
+    local re='^apps: \[(([a-z0-9][a-z0-9-]*)(, [a-z0-9][a-z0-9-]*)*)?\][[:space:]]*(#.*)?$'
+    [ -f "$APPS_HOSTNAME_FILE" ] || die "$APPS_HOSTNAME_FILE not found"
+    n=$(head -n1 "$APPS_HOSTNAME_FILE")
+    n=${n%%.*}
+    [[ $n =~ ^[A-Za-z0-9_-]+$ ]] || die "cannot derive a node name from $APPS_HOSTNAME_FILE"
+    f=$SRC/nodes/$n.yml
+    [ -f "$f" ] || return 0 # keep the baked list
+    while IFS= read -r line || [ -n "$line" ]; do
+        [[ $line == apps:* ]] || continue
+        count=$((count + 1))
+        [[ $line =~ $re ]] || die "nodes/$n.yml: malformed apps line '$line' (want: apps: [a, b] or apps: []), nothing changed"
+        list=${BASH_REMATCH[1]}
+    done < "$f"
+    [ "$count" -eq 1 ] || die "nodes/$n.yml: need exactly one 'apps: [a, b]' line, found $count, nothing changed"
+    APPS_LIST=${list//,/ }
+}
+
 main() {
     exec 9> "$APPS_LOCK"
     flock 9
     work=$(mktemp -d) # global: the EXIT trap runs after main returns
     trap 'rm -rf "$work"' EXIT
     fetch "$work"
+    resolve_list
     case ${1:-sync} in
         sync) reconcile ;;
         reset) shift; parse_reset "$@" ;;
