@@ -423,7 +423,7 @@ def test_netbird_dashboard_env():
     d = parse_quadlet(APPS / "netbird" / "netbird-dashboard.container")["Container"]
     assert d["EnvironmentFile"] == ["/etc/containers/systemd/apps/netbird/dashboard.env"]
     env = env_file(APPS / "netbird" / "dashboard.env")
-    host = "https://netbird.veronoi.cc"
+    host = "https://netbird.service.veronoi.cc"
     assert env["NETBIRD_MGMT_API_ENDPOINT"] == host and env["NETBIRD_MGMT_GRPC_API_ENDPOINT"] == host
     assert env["AUTH_AUTHORITY"] == f"{host}/oauth2"  # the EMBEDDED issuer: it stays the primary IdP (README.md)
     assert env["USE_AUTH0"] == "false" and env["AUTH_CLIENT_SECRET"] == ""
@@ -703,7 +703,7 @@ def test_netbird_recipe_round_trip(tmp_path, real_tools):
     work, cipher, plain = run_recipe(recipe, tmp_path, real_tools, "ecstasy", "secrets/ecstasy/netbird-server.yaml.sops")
     assert "authSecret: ENC[" in cipher and "encryptionKey: ENC[" in cipher
     cfg = yaml.safe_load(plain)["server"]
-    assert cfg["auth"]["issuer"] == "https://netbird.veronoi.cc/oauth2"  # embedded IdP stays: no startup dependency on Authentik
+    assert cfg["auth"]["issuer"] == "https://netbird.service.veronoi.cc/oauth2"  # embedded IdP stays: no startup dependency on Authentik
     # The recipe only runs on a fresh/reset install, where the server refuses localAuthDisabled: true until a non-local
     # connector exists: so it starts with false (local /setup), and a separate README command flips it once Authentik is added.
     assert cfg["auth"]["localAuthDisabled"] is False

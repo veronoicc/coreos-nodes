@@ -1,6 +1,6 @@
 # Self-hosted NetBird backend
 
-Optional control plane on ecstasy, domain `netbird.veronoi.cc`. Fully declarative: Quadlets and plain config from `apps/netbird/` via
+Optional control plane on ecstasy, domain `netbird.service.veronoi.cc`. Fully declarative: Quadlets and plain config from `apps/netbird/` via
 `apps-sync`, the server config with its secrets as `secrets/ecstasy/netbird-server.yaml.sops` via `secrets-sync`, state in a Quadlet named
 volume. TLS and routing come from the shared [Traefik](../traefik/README.md) app. No helper script, no step on the node except
 reinstalling it once (see below). Generic mechanics: root [README](../../README.md) (Apps from git, Secrets).
@@ -58,7 +58,7 @@ settings), encrypted with SOPS. The plaintext only exists in a pipe: random secr
 ```
 printf 'server:
   listenAddress: ":80"
-  exposedAddress: "https://netbird.veronoi.cc:443"
+  exposedAddress: "https://netbird.service.veronoi.cc:443"
   stunPorts:
     - 3478
   metricsPort: 9090
@@ -68,13 +68,13 @@ printf 'server:
   authSecret: "%s"
   dataDir: "/var/lib/netbird"
   auth:
-    issuer: "https://netbird.veronoi.cc/oauth2"
+    issuer: "https://netbird.service.veronoi.cc/oauth2"
     localAuthDisabled: false
     signKeyRefreshEnabled: true
     sessionCookieEncryptionKey: "%s"
     dashboardRedirectURIs:
-      - "https://netbird.veronoi.cc/nb-auth"
-      - "https://netbird.veronoi.cc/nb-silent-auth"
+      - "https://netbird.service.veronoi.cc/nb-auth"
+      - "https://netbird.service.veronoi.cc/nb-silent-auth"
     cliRedirectURIs:
       - "http://localhost:53000/"
   reverseProxy:
@@ -143,13 +143,13 @@ and still renders the other targets (for example `netbird.env.sops`); the backen
 The order for the whole setup is: **1. NetBird with its local login (this page)**, 2. coke joins with a setup key, 3. Authentik
 behind ecstasy's Traefik, 4. NetBird login via Authentik. Details of 2 and 3: [`apps/authentik/README.md`](../authentik/README.md).
 
-1. Once DNS resolves and the ports are open, open `https://netbird.veronoi.cc/setup` and create the first admin (dashboard and
+1. Once DNS resolves and the ports are open, open `https://netbird.service.veronoi.cc/setup` and create the first admin (dashboard and
    embedded Dex are served by the node itself; the certificate is issued on the first request).
 2. Dashboard -> Setup Keys -> create a key.
 3. The committed `secrets/ecstasy/netbird.env.sops` holds a dummy `NB_SETUP_KEY`. Replace it with the real key (the client Quadlet
-   is baked into the Ignition, see root README "Secrets"; `NB_MANAGEMENT_URL=https://netbird.veronoi.cc`):
+   is baked into the Ignition, see root README "Secrets"; `NB_MANAGEMENT_URL=https://netbird.service.veronoi.cc:443`):
    ```
-   printf 'NB_SETUP_KEY=%s\nNB_MANAGEMENT_URL=https://netbird.veronoi.cc\n' '<key>' |
+   printf 'NB_SETUP_KEY=%s\nNB_MANAGEMENT_URL=https://netbird.service.veronoi.cc:443\n' '<key>' |
      sops --encrypt --filename-override secrets/ecstasy/netbird.env.sops \
        --input-type dotenv --output-type dotenv --output secrets/ecstasy/netbird.env.sops /dev/stdin
    ```
@@ -204,7 +204,7 @@ connector, and the local login is switched off**:
 
 What happens to the old embedded-IdP login: with `localAuthDisabled: true` the `local` connector is removed at server start, existing
 local users stay in the database but cannot sign in; the dashboard's own OIDC client (`netbird-dashboard`, issuer
-`https://netbird.veronoi.cc/oauth2`) is unchanged.
+`https://netbird.service.veronoi.cc/oauth2`) is unchanged.
 
 ## Backup
 
