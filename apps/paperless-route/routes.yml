@@ -1,34 +1,30 @@
-# Traefik route for paperless.service.veronoi.cc, public + mesh: served on `websecure` (public IP) and `mesh` (ecstasy's mesh
-# IP). Paperless itself runs on coke, which accepts no inbound connections: Traefik reaches it over the NetBird mesh at
-# coke's mesh address.
-# /admin (Django admin) is blocked on the public side only: the second router matches it on `websecure` with a higher
-# priority and answers 403 (an IP allow list no client can match, TEST-NET-1); on `mesh` it is served as usual.
+# Traefik routes for paperless.service.veronoi.cc. Paperless itself runs on coke, which accepts no inbound connections:
+# Traefik reaches it over the NetBird mesh at coke's mesh address.
+# `paperless` (mesh peers, who resolve the name to ecstasy's mesh IP): the whole app, mesh entrypoint only.
+# `paperless-share` (internet): only /share/. paperless-ngx v3.4.2 serves a share link at `^share/(?P<slug>\w+)/?$`
+# (src/paperless/urls.py:301, SharedLinkView) and answers with the document itself (no login, no static assets, no redirect
+# to another path on success), so PathPrefix(`/share/`) is all a share link needs. Expired/unknown links redirect to the
+# login page (/accounts/login/...), which is deliberately not served publicly.
 # MESH ADDRESS: the same address is in apps/paperless/paperless.container (PublishPort); a test checks they match.
 # See apps/paperless/README.md.
 http:
   routers:
     paperless:
       rule: Host(`paperless.service.veronoi.cc`)
-      entryPoints: [websecure, mesh]
+      entryPoints: [mesh]
       tls:
         certResolver: letsencrypt-dns
         domains:
           - main: "*.service.veronoi.cc"
       service: paperless
-    paperless-admin-public:
-      rule: Host(`paperless.service.veronoi.cc`) && PathPrefix(`/admin`)
+    paperless-share:
+      rule: Host(`paperless.service.veronoi.cc`) && PathPrefix(`/share/`)
       entryPoints: [websecure]
-      priority: 1000
       tls:
         certResolver: letsencrypt-dns
         domains:
           - main: "*.service.veronoi.cc"
-      middlewares: [paperless-deny]
       service: paperless
-  middlewares:
-    paperless-deny:
-      ipAllowList:
-        sourceRange: ["192.0.2.1/32"]
   services:
     paperless:
       loadBalancer:

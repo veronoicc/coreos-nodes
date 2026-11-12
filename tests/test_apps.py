@@ -187,8 +187,7 @@ def traefik_flags():
 
 
 PUBLIC_IP, MESH_IP = "176.65.149.212", "100.127.17.6"  # ecstasy: ens18 and wt0 (the NetBird mesh address of the peer)
-INTERNAL_ZONE = "internal.veronoi.cc"  # mesh only
-SERVICE_ZONE = "service.veronoi.cc"  # public + mesh
+SERVICE_ZONE = "service.veronoi.cc"  # Cloudflare wildcard -> public IP; NetBird zone wildcard -> mesh IP for mesh peers
 PUBLIC_EXCEPTIONS = {"netbird.veronoi.cc", "auth.veronoi.cc"}  # public, keep their names, certificate via TLS-ALPN
 
 
@@ -238,50 +237,59 @@ def test_traefik_network_unit():
     assert parse_quadlet(APPS / "traefik" / "traefik.network")["Network"]["Subnet"] == ["172.30.0.0/24"]
 
 
+PATH_RESTRICTION = re.compile(r"\bPath(Prefix)?\(")
+
+
 def check_router(name, r):
     """The domain scheme (README.md, Domain scheme). Every router names its entry points: `mesh` is Traefik's default, so a
-    forgotten entryPoints would still be private, but an explicit list is what a reviewer can read. `<x>.internal` is mesh
-    only, `<x>.service` is public (+ mesh), both with their wildcard certificate; anything else must be a public exception."""
+    forgotten entryPoints would still be private, but an explicit list is what a reviewer can read. `<x>.service` hosts
+    are `[mesh]` (mesh only), `[websecure, mesh]` (public) or `[websecure]` only with a path restriction in the rule, with
+    the wildcard certificate; anything else must be a public exception."""
     eps = r.get("entryPoints")
     assert eps and set(eps) <= {"websecure", "mesh"} and len(set(eps)) == len(eps), f"{name}: entryPoints must be explicit"
     hosts = re.findall(r"Host\(`([^`]+)`\)", r["rule"])
     assert hosts, f"{name}: certificates are requested per Host rule"
     for h in hosts:
-        for zone, allowed in ((INTERNAL_ZONE, [["mesh"]]), (SERVICE_ZONE, [["websecure"], ["websecure", "mesh"], ["mesh", "websecure"]])):
-            if h.endswith("." + zone):
-                assert "." not in h[: -len(zone) - 1], f"{name}: {h} is not covered by *.{zone}"
-                assert eps in allowed, f"{name}: {h} must be served on {allowed}"
-                assert r["tls"] == {"certResolver": "letsencrypt-dns", "domains": [{"main": f"*.{zone}"}]}, name
-                break
+        if h.endswith("." + SERVICE_ZONE):
+            assert "." not in h[: -len(SERVICE_ZONE) - 1], f"{name}: {h} is not covered by *.{SERVICE_ZONE}"
+            assert "mesh" in eps or PATH_RESTRICTION.search(r["rule"]), f"{name}: {h} on websecure alone needs a path restriction"
+            assert r["tls"] == {"certResolver": "letsencrypt-dns", "domains": [{"main": f"*.{SERVICE_ZONE}"}]}, name
         else:  # a name outside the scheme is public by definition: it cannot resolve on the mesh zone
-            assert h in PUBLIC_EXCEPTIONS, f"{name}: {h} is neither *.{INTERNAL_ZONE}, *.{SERVICE_ZONE} nor a public exception"
+            assert h in PUBLIC_EXCEPTIONS, f"{name}: {h} is neither *.{SERVICE_ZONE} nor a public exception"
             assert eps == ["websecure"] and r["tls"] == {"certResolver": "letsencrypt"}, name
-    assert len(set(hosts)) == 1 or all(h.endswith("." + SERVICE_ZONE) or h.endswith("." + INTERNAL_ZONE) for h in hosts), f"{name}: mixed hosts"
+    assert len(set(hosts)) == 1 or all(h.endswith("." + SERVICE_ZONE) for h in hosts), f"{name}: mixed hosts"
+
+
+def check_mesh_coverage(routers):
+    """Mesh peers resolve every service host to the mesh entrypoint: each needs a mesh router without a path restriction."""
+    hosts = {h for r in routers.values() for h in re.findall(r"Host\(`([^`]+)`\)", r["rule"]) if h.endswith("." + SERVICE_ZONE)}
+    for h in hosts:
+        assert any(f"Host(`{h}`)" in r["rule"] and "mesh" in r["entryPoints"] and not PATH_RESTRICTION.search(r["rule"])
+                   for r in routers.values()), f"{h}: no full mesh router"
 
 
 def _tls(zone):
     return {"certResolver": "letsencrypt-dns", "domains": [{"main": f"*.{zone}"}]}
 
 
-@pytest.mark.parametrize("host,eps,tls,ok", [
-    ("a.internal.veronoi.cc", ["mesh"], _tls(INTERNAL_ZONE), True),
-    ("a.internal.veronoi.cc", ["websecure"], _tls(INTERNAL_ZONE), False),  # internal is never public
-    ("a.internal.veronoi.cc", ["websecure", "mesh"], _tls(INTERNAL_ZONE), False),
-    ("a.internal.veronoi.cc", ["mesh"], _tls(SERVICE_ZONE), False),  # wrong wildcard
-    ("a.b.internal.veronoi.cc", ["mesh"], _tls(INTERNAL_ZONE), False),  # not covered by the wildcard
-    ("a.service.veronoi.cc", ["websecure"], _tls(SERVICE_ZONE), True),
-    ("a.service.veronoi.cc", ["websecure", "mesh"], _tls(SERVICE_ZONE), True),
-    ("a.service.veronoi.cc", ["mesh"], _tls(SERVICE_ZONE), False),  # service must include websecure
-    ("a.service.veronoi.cc", ["websecure", "mesh"], _tls(INTERNAL_ZONE), False),
-    ("a.service.veronoi.cc", ["websecure", "mesh"], {"certResolver": "letsencrypt"}, False),
-    ("a.b.service.veronoi.cc", ["websecure"], _tls(SERVICE_ZONE), False),
-    ("netbird.veronoi.cc", ["websecure"], {"certResolver": "letsencrypt"}, True),
-    ("auth.veronoi.cc", ["websecure"], {"certResolver": "letsencrypt"}, True),
-    ("auth.veronoi.cc", ["websecure", "mesh"], {"certResolver": "letsencrypt"}, False),
-    ("other.veronoi.cc", ["websecure"], {"certResolver": "letsencrypt"}, False),
+@pytest.mark.parametrize("rule,eps,tls,ok", [
+    ("Host(`a.service.veronoi.cc`)", ["mesh"], _tls(SERVICE_ZONE), True),
+    ("Host(`a.service.veronoi.cc`)", ["websecure", "mesh"], _tls(SERVICE_ZONE), True),
+    ("Host(`a.service.veronoi.cc`)", ["mesh", "websecure"], _tls(SERVICE_ZONE), True),
+    ("Host(`a.service.veronoi.cc`)", ["websecure"], _tls(SERVICE_ZONE), False),  # public without path limit and no mesh
+    ("Host(`a.service.veronoi.cc`) && PathPrefix(`/share/`)", ["websecure"], _tls(SERVICE_ZONE), True),
+    ("Host(`a.service.veronoi.cc`) && Path(`/x`)", ["websecure"], _tls(SERVICE_ZONE), True),
+    ("Host(`a.service.veronoi.cc`) && PathPrefix(`/share/`)", ["mesh"], _tls(SERVICE_ZONE), True),
+    ("Host(`a.service.veronoi.cc`)", ["mesh"], _tls("veronoi.cc"), False),  # wrong wildcard
+    ("Host(`a.service.veronoi.cc`)", ["websecure", "mesh"], {"certResolver": "letsencrypt"}, False),
+    ("Host(`a.b.service.veronoi.cc`)", ["mesh"], _tls(SERVICE_ZONE), False),  # not covered by the wildcard
+    ("Host(`netbird.veronoi.cc`)", ["websecure"], {"certResolver": "letsencrypt"}, True),
+    ("Host(`auth.veronoi.cc`)", ["websecure"], {"certResolver": "letsencrypt"}, True),
+    ("Host(`auth.veronoi.cc`)", ["websecure", "mesh"], {"certResolver": "letsencrypt"}, False),
+    ("Host(`other.veronoi.cc`)", ["websecure"], {"certResolver": "letsencrypt"}, False),
 ])
-def test_check_router_domain_scheme(host, eps, tls, ok):
-    router = {"rule": f"Host(`{host}`)", "entryPoints": eps, "tls": tls, "service": "x"}
+def test_check_router_domain_scheme(rule, eps, tls, ok):
+    router = {"rule": rule, "entryPoints": eps, "tls": tls, "service": "x"}
     if ok:
         check_router("t", router)
     else:
@@ -291,7 +299,17 @@ def test_check_router_domain_scheme(host, eps, tls, ok):
 
 def test_check_router_requires_entrypoints():
     with pytest.raises(AssertionError):
-        check_router("t", {"rule": "Host(`a.internal.veronoi.cc`)", "tls": _tls(INTERNAL_ZONE), "service": "x"})
+        check_router("t", {"rule": "Host(`a.service.veronoi.cc`)", "tls": _tls(SERVICE_ZONE), "service": "x"})
+
+
+def test_every_service_host_has_a_full_mesh_router():
+    pub = {"rule": "Host(`a.service.veronoi.cc`) && PathPrefix(`/share/`)", "entryPoints": ["websecure"]}
+    mesh = {"rule": "Host(`a.service.veronoi.cc`)", "entryPoints": ["mesh"]}
+    check_mesh_coverage({"m": mesh, "p": pub})
+    with pytest.raises(AssertionError):
+        check_mesh_coverage({"p": pub})  # mesh peers would get nothing
+    with pytest.raises(AssertionError):
+        check_mesh_coverage({"p": pub, "m": {**mesh, "rule": mesh["rule"] + " && PathPrefix(`/x`)"}})
 
 
 def route_files(node):
@@ -326,6 +344,7 @@ def test_everything_traefik_reads_on_a_node_is_a_valid_route_file(node):
             services[n] = s
     for n, r in routers.items():
         assert r["service"] in services, f"router {n}: unknown service {r['service']}"
+    check_mesh_coverage(routers)
     assert all(c.get("tls") for c in routers.values())
 
 
@@ -559,19 +578,19 @@ def test_paperless_is_published_on_the_mesh_address_only():
     assert u["Unit"]["Requires"] == ["paperless-valkey.service"] and "paperless-valkey.service" in u["Unit"]["After"][0].split()
 
 
-def test_paperless_route_is_public_with_admin_blocked_and_points_at_the_published_address():
+def test_paperless_route_is_mesh_only_except_the_share_link_and_points_at_the_published_address():
     ip = containers("paperless")["paperless"]["Container"]["PublishPort"][0].split(":")[0]
     route = load_routes(APPS / "paperless-route" / "routes.yml")["http"]  # check_router runs on it via the ecstasy route test
     assert route["services"]["paperless"]["loadBalancer"]["servers"] == [{"url": f"http://{ip}:8000"}]
     router = route["routers"]["paperless"]
-    assert router["rule"] == "Host(`paperless.service.veronoi.cc`)" and router["entryPoints"] == ["websecure", "mesh"]
-    # Django admin is blocked on the public entrypoint only: websecure-only, outranks the main router, denied by an IP allow list
-    # that no client can match (403); the mesh entrypoint is not in its entryPoints, so /admin stays reachable there
-    admin = route["routers"]["paperless-admin-public"]
-    assert admin["rule"] == "Host(`paperless.service.veronoi.cc`) && PathPrefix(`/admin`)" and admin["entryPoints"] == ["websecure"]
-    assert admin["priority"] > router.get("priority", len(router["rule"])) and admin["priority"] > len(admin["rule"])
-    assert admin["service"] == "paperless" and admin["middlewares"] == ["paperless-deny"]
-    assert route["middlewares"]["paperless-deny"] == {"ipAllowList": {"sourceRange": ["192.0.2.1/32"]}}
+    assert router["rule"] == "Host(`paperless.service.veronoi.cc`)" and router["entryPoints"] == ["mesh"]
+    # the internet only gets the share link view: ^share/<slug>/?$ (paperless-ngx v3.4.2 src/paperless/urls.py:301), which
+    # serves the file itself (documents/views.py SharedLinkView), no static assets or other path needed
+    public = {n: r for n, r in route["routers"].items() if "websecure" in r["entryPoints"]}
+    assert set(public) == {"paperless-share"}
+    assert public["paperless-share"]["rule"] == "Host(`paperless.service.veronoi.cc`) && PathPrefix(`/share/`)"
+    assert public["paperless-share"]["entryPoints"] == ["websecure"] and public["paperless-share"]["service"] == "paperless"
+    assert "middlewares" not in route
     assert "paperless-route" in NODES["ecstasy"] and "paperless-route" not in NODES["coke"]
 
 
