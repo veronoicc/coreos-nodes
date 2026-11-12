@@ -188,6 +188,7 @@ connector, and the local login is switched off**:
    (verified with the pinned sops 3.13.3: prints just the value).
 2. NetBird dashboard -> **Settings -> Identity Providers -> Add Identity Provider**: Type `Generic OIDC`, Name `Authentik`,
    Client ID `netbird`, Client Secret = the value from step 1, Issuer `https://auth.veronoi.cc/application/o/netbird/`.
+   (New issuer value once the switch happens: `https://auth.service.veronoi.cc/application/o/netbird/`; the old value above keeps working meanwhile.)
    The redirect URL the dashboard shows is `https://netbird.veronoi.cc/oauth2/callback`; the Authentik blueprint (`apps/authentik`) already
    contains exactly that (strict) plus the logout callback, so there is nothing to copy into Authentik. Click **Add Provider**.
 3. Switch the local email/password login off (only Authentik remains on the sign-in page), then commit, push and let `secrets-sync`

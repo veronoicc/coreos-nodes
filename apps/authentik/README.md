@@ -2,19 +2,20 @@
 
 Authentik 2026.8 (server, worker, PostgreSQL; no Redis: upstream's 2026.8.5 compose has none) on **coke**
 (`apps: [authentik]` in `nodes/coke.yml`, `coke.node.veronoi.cc`, Fedora CoreOS, `/dev/vda`, 8 GB RAM or more). Public name:
-`auth.veronoi.cc`. Fully declarative: Quadlets, settings and a blueprint from `apps/authentik/` via `apps-sync`, secrets as
+`auth.service.veronoi.cc` (public + mesh, wildcard certificate). `auth.veronoi.cc` is kept temporarily, only until the NetBird connector
+issuer is switched to `https://auth.service.veronoi.cc/application/o/netbird/`. Fully declarative: Quadlets, settings and a blueprint from `apps/authentik/` via `apps-sync`, secrets as
 `secrets/coke/authentik.env.sops` via `secrets-sync`. Generic mechanics: root [README](../../README.md).
 
 ## Topology: coke accepts no inbound connections
 
 ```
-browser --443--> ecstasy (176.65.149.212): Traefik, TLS for auth.veronoi.cc (Let's Encrypt)
+browser --443--> ecstasy (176.65.149.212): Traefik, TLS for auth.service.veronoi.cc (Let's Encrypt DNS wildcard; auth.veronoi.cc: TLS-ALPN, temporary)
                    |  http, over the NetBird mesh (100.64.0.0/10)
                    v
                  coke: authentik-server on <coke's mesh address>:9000  (nothing else listens for the outside)
 ```
 
-- DNS: **A** record `auth.veronoi.cc` -> `176.65.149.212` (ecstasy), no AAAA. Ports `80/443` are ecstasy's, see the [Traefik README](../traefik/README.md).
+- DNS: `auth.service.veronoi.cc` is covered by the wildcard `A *.service` (no per-name step). The temporary name needs **A** record `auth.veronoi.cc` -> `176.65.149.212` (ecstasy), no AAAA. Ports `80/443` are ecstasy's, see the [Traefik README](../traefik/README.md).
   coke needs no DNS record and no open port; its NetBird client connects outbound only (the relay handles NAT).
 - The route lives in [`apps/authentik-route`](../authentik-route/README.md) (only a `routes.yml`), deployed on ecstasy, so the Traefik app
   stays app-agnostic. Authentik itself never sees the internet.
@@ -27,7 +28,7 @@ browser --443--> ecstasy (176.65.149.212): Traefik, TLS for auth.veronoi.cc (Let
   DNATed connection to the bridge gateway. With `NB_FWMARK_BASE=0x1000000` on the client that no longer happens, and a direct mesh
   request from ecstasy arrives as `100.127.17.6`. The gateway entry stays so a regression (e.g. a client update restoring the old
   marks) still yields correct `X-Forwarded-*` handling. Trusting these makes Authentik honour the `X-Forwarded-Proto/Host` from
-  Traefik and build `https://auth.veronoi.cc/...` URLs.
+  Traefik and build `https://auth.service.veronoi.cc/...` URLs.
 - No SMTP (no recovery mails). Error reporting off (`AUTHENTIK_ERROR_REPORTING__ENABLED=false`) and update check off
   (`AUTHENTIK_DISABLE_UPDATE_CHECK=true`): no telemetry call-home that upstream allows to disable.
 
@@ -62,10 +63,10 @@ and joins the mesh only after this; no login needed) and run `scripts/add-node.s
 | 2 | coke | Dashboard -> Setup Keys -> create a key for coke. Encrypt it as `secrets/coke/netbird.env.sops` (recipe below), push. coke's baked NetBird client joins (outbound only). |
 | 3 | git | Put coke's mesh address into the two files (one-time, below). |
 | 4 | coke | Create `secrets/coke/authentik.env.sops` (recipe below), push. Authentik starts, the blueprint is applied. |
-| 5 | browser | Authentik initial setup `https://auth.veronoi.cc/if/flow/initial-setup/` (needs DNS and the route from steps 3 and 4). |
+| 5 | browser | Authentik initial setup `https://auth.service.veronoi.cc/if/flow/initial-setup/` (needs DNS and the route from steps 3 and 4). |
 | 6 | NetBird | Add Authentik as an identity provider: [`apps/netbird/README.md`](../netbird/README.md), "Login via Authentik". |
 
-DNS `auth.veronoi.cc` -> ecstasy before step 4 (otherwise ecstasy's Traefik cannot obtain the certificate yet and retries later).
+DNS `auth.service.veronoi.cc` is the `*.service` wildcard; `auth.veronoi.cc` -> ecstasy (temporary name) before step 4 (otherwise ecstasy's Traefik cannot obtain the certificate yet and retries later).
 
 ### 2. coke joins the mesh
 
@@ -118,7 +119,7 @@ git push
 
 ### 5. First admin
 
-Open `https://auth.veronoi.cc/if/flow/initial-setup/` and set the password of `akadmin` (the first request wins: do it right away; the
+Open `https://auth.service.veronoi.cc/if/flow/initial-setup/` and set the password of `akadmin` (the first request wins: do it right away; the
 URL is public). Create your own user, add a passkey/TOTP, and keep `akadmin` as break-glass or deactivate it.
 
 ### What the blueprint creates
@@ -171,7 +172,7 @@ a data directory of another major version does not start. `apps-sync` restarts o
 
 ## Failure modes
 
-- Mesh down or ecstasy down: `https://auth.veronoi.cc` answers `502`/times out. NetBird keeps working (existing tunnels are unaffected, the
+- Mesh down or ecstasy down: `https://auth.service.veronoi.cc` answers `502`/times out. NetBird keeps working (existing tunnels are unaffected, the
   NetBird server starts without Authentik, see the NetBird README), but dashboard login is impossible: NetBird has no local login.
 - coke rebooted: `authentik-server` waits for the mesh interface and retries every 10 s; `authentik-postgres` is healthy before the
   server and worker start.

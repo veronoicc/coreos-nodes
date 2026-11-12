@@ -87,7 +87,7 @@ and exist as `apps/<name>/`, or the build fails. The line must be a single-line 
    drawn before the key existed). `scripts/node-key.sh <user>@<host>` fetches it over SSH for a node you can reach.
 3. `scripts/add-node.sh coke <key>` (registers it as a recipient).
 4. Give coke a NetBird setup key so it joins the mesh: `secrets/coke/netbird.env.sops`, same recipe as for ecstasy ([Secrets](#secrets-sops--age)).
-5. Create the Authentik secrets as in [`apps/authentik/README.md`](apps/authentik/README.md). DNS for `auth.veronoi.cc` points at ecstasy, not coke.
+5. Create the Authentik secrets as in [`apps/authentik/README.md`](apps/authentik/README.md). Authentik's name is `auth.service.veronoi.cc` (covered by the `*.service` wildcard); `auth.veronoi.cc` is kept temporarily until the NetBird connector issuer is switched, its DNS points at ecstasy, not coke.
 
 ## Secrets (SOPS + age)
 
@@ -262,7 +262,7 @@ copy left on a node by an older `apps-sync` is removed quietly. Every other regu
 
 ## Self-hosted NetBird and Authentik
 
-NetBird control plane on ecstasy (`netbird.veronoi.cc`), Authentik on coke (`auth.veronoi.cc`, no inbound ports, reached by ecstasy's
+NetBird control plane on ecstasy (`netbird.veronoi.cc`), Authentik on coke (`auth.service.veronoi.cc`, `auth.veronoi.cc` kept temporarily until the NetBird connector issuer is switched; no inbound ports, reached by ecstasy's
 Traefik over the NetBird mesh), shared Traefik: all declarative, nothing app-specific outside `apps/`. Setup, DNS/firewall, recipes,
 order of steps, backup and security notes: [`apps/netbird/README.md`](apps/netbird/README.md),
 [`apps/authentik/README.md`](apps/authentik/README.md), [`apps/traefik/README.md`](apps/traefik/README.md).
