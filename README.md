@@ -306,9 +306,10 @@ Environment=NB_FWMARK_BASE=0x1000000
 then `sudo systemctl daemon-reload && sudo systemctl restart netbird.service`. Check: `curl https://netbird.service.veronoi.cc/?ipcheck=1`
 on ecstasy shows the real client IP in Traefik's log, not `172.30.0.1`.
 
-**Eager connections on nodes.** With the account's lazy connections, a node starts with its peers idle, and a route through an idle
-peer (coke -> printer via Home Assistant) has no routing peer assigned until that peer has connected: the route then fails locally with
-`No route to host`. The baked client Quadlet sets `Environment=NB_LAZY_CONN=off` (a local override of the account flag). Nodes installed
+**Eager connections on nodes.** A route through another peer (coke -> printer via Home Assistant) only works while that routing peer is
+connected; until then NetBird assigns no routing peer and the route fails locally with `No route to host`. So that a node does not wait for
+traffic before connecting, the baked client Quadlet sets `Environment=NB_LAZY_CONN=off` (a local override of the account flag). This only
+removes the idle phase on the node; it does not help when the routing peer itself never completes the connection. Nodes installed
 before this need `/etc/containers/systemd/netbird.container.d/30-eager.conf` with `[Container]` and `Environment=NB_LAZY_CONN=off`, then the
 same daemon-reload and restart. Check: `netbird status` on the node shows `Lazy connection: false`.
 
