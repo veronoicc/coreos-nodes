@@ -243,7 +243,7 @@ def test_secrets_sync_renders_netbird_env_and_restarts_unit(vm, tmp_path, real_t
     shutil.copy(ROOT / "secrets" / "tools.version", src / "secrets" / "tools.version")
     shutil.copy(ROOT / "secrets" / "ecstasy" / "targets.conf", src / "secrets" / "ecstasy" / "targets.conf")
     plain = tmp_path / "plain.env"
-    plain.write_text(f"NB_SETUP_KEY={NB_KEY}\nNB_MANAGEMENT_URL=https://netbird.veronoi.cc\n")
+    plain.write_text(f"NB_SETUP_KEY={NB_KEY}\nNB_MANAGEMENT_URL=https://netbird.service.veronoi.cc\n")
     subprocess.run(  # throwaway admin key + the VM's own public key as recipients; the VM's private key never leaves it
         [real_tools.sops, "--encrypt", "--age", f"{admin_pub},{pub}", "--input-type", "dotenv", "--output-type", "dotenv",
          "--output", src / "secrets" / "ecstasy" / "netbird.env.sops", plain],
@@ -253,7 +253,7 @@ def test_secrets_sync_renders_netbird_env_and_restarts_unit(vm, tmp_path, real_t
     r = ssh(*SYNC, check=False)
     assert r.returncode == 0, r.stderr
     assert ssh("sudo", "stat", "-c", "%a %U", "/var/data/secrets/netbird.env").stdout.strip() == "600 root"
-    assert ssh("sudo", "cat", "/var/data/secrets/netbird.env").stdout == f"NB_SETUP_KEY={NB_KEY}\nNB_MANAGEMENT_URL=https://netbird.veronoi.cc\n"
+    assert ssh("sudo", "cat", "/var/data/secrets/netbird.env").stdout == f"NB_SETUP_KEY={NB_KEY}\nNB_MANAGEMENT_URL=https://netbird.service.veronoi.cc\n"
     show = ssh("systemctl", "show", "-p", "ConditionResult,ActiveState", "netbird.service").stdout
     assert "ConditionResult=yes" in show and "ActiveState=active" in show, show
     assert "netbird" in ssh("sudo", "podman", "ps", "--format", "{{.Names}}").stdout
@@ -264,8 +264,8 @@ def test_secrets_sync_renders_netbird_env_and_restarts_unit(vm, tmp_path, real_t
     assert "updated" not in r.stdout + r.stderr
 
 
-NB_HOST = "netbird.veronoi.cc"
-AUTH_HOST = "auth.veronoi.cc"
+NB_HOST = "netbird.service.veronoi.cc"
+AUTH_HOST = "auth.service.veronoi.cc"
 NB_UNITS = ("netbird-server.service", "netbird-dashboard.service")
 BACKEND_UNITS = ("traefik.service", *NB_UNITS)
 AK_UNITS = ("authentik-postgres.service", "authentik-server.service", "authentik-worker.service")
@@ -412,10 +412,10 @@ def test_ecstasy_apps_are_declarative(vm, tmp_path, real_tools):
     redirect = ssh("curl", "-s", "-o", "/dev/null", "-w", "%{http_code} %{redirect_url}", "-H", f"Host: {NB_HOST}", "http://127.0.0.1/").stdout
     assert redirect.split()[0] in {"301", "308"} and redirect.split()[1] == f"https://{NB_HOST}/", redirect
 
-    # 5. named volumes hold the state; Traefik handled acme.json itself (no root mkdir/chmod anywhere)
+    # 5. named volumes hold the state; Traefik handled acme-dns.json itself (no root mkdir/chmod anywhere)
     mount = sudo("podman", "volume", "inspect", "-f", "{{.Mountpoint}}", "traefik-letsencrypt").stdout.strip()
     assert mount.startswith("/var/lib/containers/storage/volumes/"), mount
-    assert sudo("stat", "-c", "%a %U", f"{mount}/acme.json").stdout.strip() == "600 root"  # created by Traefik itself
+    assert sudo("stat", "-c", "%a %U", f"{mount}/acme-dns.json").stdout.strip() == "600 root"  # created by Traefik itself
     data = sudo("podman", "volume", "inspect", "-f", "{{.Mountpoint}}", "netbird-data").stdout.strip()
     assert sudo("sh", "-c", f"ls {data}").stdout.split(), "netbird-data volume is empty"
     print("selinux:", sudo("sh", "-c", f"ls -dZ {data} {mount} {d}", check=False).stdout)
