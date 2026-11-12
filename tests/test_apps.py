@@ -834,11 +834,13 @@ def test_scanservjs_shares_the_consume_volume_with_paperless_on_the_same_node():
 
 def test_scanservjs_static_scanner_and_no_ignored_discovery():
     c = containers("scanservjs")["scanservjs"]["Container"]
-    assert c["AddHost"] == ["printer.device:10.0.0.34"]
+    # the printer answers GETs for any Host header but refuses POST /eSCL/ScanJobs (403) unless the Host is its IP
+    # (observed from coke: 403 with Host printer.device:8080, 201 with 10.0.0.34:8080), so the URL uses the IP, no AddHost
+    assert "AddHost" not in c
     assert c["EnvironmentFile"] == ["/etc/containers/systemd/apps/scanservjs/settings.env"]
     assert "Environment" not in c  # settings.env is read raw by podman, the quotes of the airscan entry survive
     env = env_file(APPS / "scanservjs" / "settings.env")
-    assert env == {"AIRSCAN_DEVICES": '"HP Smart Tank 580" = "http://printer.device:8080/eSCL"'}
+    assert env == {"AIRSCAN_DEVICES": '"HP Smart Tank 580" = "http://10.0.0.34:8080/eSCL"'}
     # discovery stays on: SCANIMAGE_LIST_IGNORE would stop `scanimage -L` (and the UI would list no device) unless DEVICES is set
     assert "SCANIMAGE_LIST_IGNORE" not in "".join(l for l in (APPS / "scanservjs" / "scanservjs.container").read_text().splitlines() if not l.startswith("#"))
     assert c["Volume"][0] == "/etc/containers/systemd/apps/scanservjs/config.local.js:/etc/scanservjs/config.local.js:ro,z"

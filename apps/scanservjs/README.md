@@ -10,7 +10,7 @@ browser/phone --443--> ecstasy: Traefik `mesh` entrypoint (scan.service.veronoi.
                               |  http, over the NetBird mesh
                               v
                             coke: scanservjs on 100.127.197.215:8081 (container port 8080)
-                              |--- eSCL http://printer.device:8080/eSCL (printer.device = 10.0.0.34, AddHost) ---> HP printer (flatbed)
+                              |--- eSCL http://10.0.0.34:8080/eSCL (by IP: the printer refuses scan jobs addressed to a name) ---> HP printer (flatbed)
                               '--- PDF into the volume paperless-consume = Paperless's consume folder ---> Paperless imports and deletes it
 ```
 
@@ -18,7 +18,7 @@ browser/phone --443--> ecstasy: Traefik `mesh` entrypoint (scan.service.veronoi.
 
 | File | Content |
 |---|---|
-| `scanservjs.container` | `docker.io/sbs20/scanservjs:3.3.0`, `100.127.197.215:8081:8080`, `AddHost=printer.device:10.0.0.34`. No secrets, so no gate. |
+| `scanservjs.container` | `docker.io/sbs20/scanservjs:3.3.0`, `100.127.197.215:8081:8080`, own network `scanservjs.network` (MTU 1140). No secrets, so no gate. |
 | `settings.env` | `AIRSCAN_DEVICES`, the static sane-airscan entry. |
 | `config.local.js` | Mounted read-only to `/etc/scanservjs/config.local.js`: pipelines, batch modes, scan defaults. |
 | `routes.yml` | `scan.service.veronoi.cc` on `entryPoints: [mesh]` to `http://100.127.197.215:8081` (a test checks it matches `PublishPort`). |
@@ -30,7 +30,7 @@ is scanservjs's own 8080.
 ## Scanner configuration (checked against the scanservjs v3.3.0 sources)
 
 - The image's entrypoint (`entrypoint.sh:26-31`) writes `AIRSCAN_DEVICES` (split at `;`) into `/etc/sane.d/airscan.conf` right under `[devices]`,
-  one `sed -i "/^\[devices\]/a <entry>"` per entry. `"HP Smart Tank 580" = "http://printer.device:8080/eSCL"` ends up as exactly that line, which is
+  one `sed -i "/^\[devices\]/a <entry>"` per entry. `"HP Smart Tank 580" = "http://10.0.0.34:8080/eSCL"` ends up as exactly that line, which is
   sane-airscan's `"name" = "url"` syntax (the protocol defaults to eSCL). `settings.env` is read raw by podman, so the quotes arrive unchanged (both
   steps were run against this value with a Debian `sh`: the line is inserted as written).
 - **No dbus/avahi is needed**, but discovery must be off: without an avahi daemon, sane-airscan 0.99.35 lists **no** scanner, not even the
@@ -38,7 +38,9 @@ is scanservjs's own 8080.
   `airscan-static.conf` (mounted as `/etc/sane.d/airscan.d/static.conf`) sets `discovery = disable`; then `scanimage -L` lists
   `airscan:e0:HP Smart Tank 580`. It is a drop-in because the image's entrypoint rewrites `airscan.conf` from `AIRSCAN_DEVICES`.
 - `SCANIMAGE_LIST_IGNORE` is **not** set: it disables `scanimage -L` (`app-server/src/classes/config.js:268`) and the UI would list no device.
-- `printer.device` is pinned with `AddHost=printer.device:10.0.0.34` (the container's resolver does not know the LAN name).
+- **The printer is addressed by IP, not by name.** It answers GETs (`ScannerCapabilities`, `ScannerStatus`) whatever the `Host` header says,
+  but refuses `POST /eSCL/ScanJobs` with **403** unless `Host` is its IP (observed from coke: 403 with `Host: printer.device:8080`, `201 Created`
+  and a complete image with `10.0.0.34:8080`). `printer.device` does not resolve on coke anyway (it only exists in the DNS at the printer's site).
 - The scanner is reached from coke over the NetBird mesh. **NetBird policy needed: coke -> Printer, TCP 8080** (the eSCL port; port 80 is only the
   printer's web UI).
 - **MTU:** the path coke -> NetBird -> Home Assistant -> printer silently drops packets of about 1300 bytes (a path MTU black hole between
@@ -82,10 +84,10 @@ content, so an imported scan disappears from it (the document is in Paperless). 
 ## Printer quirks
 
 - **A scan hangs at "acquiring"**: the firmware sometimes stops answering for several minutes (TCP connects, no HTTP reply), then reports `State=Testing`
-  before going back to `Idle`. Check from a **LAN device** `curl -m 15 http://printer.device:8080/eSCL/ScannerStatus`: it answers
+  before going back to `Idle`. Check from a **LAN device** `curl -m 15 http://10.0.0.34:8080/eSCL/ScannerStatus`: it answers
   `<pwg:State>Idle</pwg:State>` when ready. Wait, or restart the printer. This is not a deployment failure. Do not poll it in a loop: its eSCL service hangs when probed too often.
-- **DHCP reservation**: `AddHost` pins `printer.device` to `10.0.0.34`. Make sure the router always gives exactly that address to the printer's MAC
-  `f0:4e:a4:4d:25:4c` (a DHCP reservation). If the address ever changes, edit `scanservjs.container` (`AddHost`) and push.
+- **DHCP reservation**: `settings.env` uses `10.0.0.34`. Make sure the router always gives exactly that address to the printer's MAC
+  `f0:4e:a4:4d:25:4c` (a DHCP reservation). If the address ever changes, edit `AIRSCAN_DEVICES` in `settings.env` and push.
 
 ## Setup order (your steps after merge)
 
@@ -99,8 +101,7 @@ content, so an imported scan disappears from it (the document is in Paperless). 
 
 Acceptance:
 
-1. From inside the container, `sudo podman exec scanservjs curl -m 15 http://printer.device:8080/eSCL/ScannerStatus` returns XML with a `pwg:State` (if `curl` is not in
-   the image, `sudo podman exec scanservjs getent hosts printer.device` and `sudo podman exec scanservjs scanimage -L` prove name and device).
+1. From inside the container, `sudo podman exec scanservjs scanimage -L` lists `airscan:e0:HP Smart Tank 580`.
 2. The UI lists the HP scanner with the Flatbed source and the resolutions above.
 3. A single-page 300 dpi colour scan appears as a new, OCR'd document in Paperless within a couple of minutes.
 4. A 2-page scan in batch mode Manual arrives in Paperless as **one** 2-page document.

@@ -17,9 +17,6 @@ Network=scanservjs.network
 # Reachable ONLY on the mesh address of this node, never on 0.0.0.0 (scanservjs has no login of its own). The same address
 # is in apps/scanservjs/routes.yml; edit both if the peer is re-registered.
 PublishPort=100.127.197.215:8081:8080
-# The scanner is configured statically (AIRSCAN_DEVICES in settings.env), mDNS does not cross the container network. The
-# hostname is pinned here instead of a DNS lookup: keep a DHCP reservation for the printer, see README.md.
-AddHost=printer.device:10.0.0.34
 EnvironmentFile=/etc/containers/systemd/apps/scanservjs/settings.env
 # Mounted as a single file: the rest of /etc/scanservjs (config.default.js, the template) stays as the image ships it.
 Volume=/etc/containers/systemd/apps/scanservjs/config.local.js:/etc/scanservjs/config.local.js:ro,z
