@@ -1,18 +1,34 @@
-# Traefik route for paperless.service.veronoi.cc, mesh-only: served on the `mesh` entrypoint (ecstasy's mesh IP) only, no
-# public DNS record. Paperless itself runs on coke, which accepts no inbound connections: Traefik reaches it over the
-# NetBird mesh at coke's mesh address.
+# Traefik route for paperless.service.veronoi.cc, public + mesh: served on `websecure` (public IP) and `mesh` (ecstasy's mesh
+# IP). Paperless itself runs on coke, which accepts no inbound connections: Traefik reaches it over the NetBird mesh at
+# coke's mesh address.
+# /admin (Django admin) is blocked on the public side only: the second router matches it on `websecure` with a higher
+# priority and answers 403 (an IP allow list no client can match, TEST-NET-1); on `mesh` it is served as usual.
 # MESH ADDRESS: the same address is in apps/paperless/paperless.container (PublishPort); a test checks they match.
 # See apps/paperless/README.md.
 http:
   routers:
     paperless:
       rule: Host(`paperless.service.veronoi.cc`)
-      entryPoints: [mesh]
+      entryPoints: [websecure, mesh]
       tls:
         certResolver: letsencrypt-dns
         domains:
           - main: "*.service.veronoi.cc"
       service: paperless
+    paperless-admin-public:
+      rule: Host(`paperless.service.veronoi.cc`) && PathPrefix(`/admin`)
+      entryPoints: [websecure]
+      priority: 1000
+      tls:
+        certResolver: letsencrypt-dns
+        domains:
+          - main: "*.service.veronoi.cc"
+      middlewares: [paperless-deny]
+      service: paperless
+  middlewares:
+    paperless-deny:
+      ipAllowList:
+        sourceRange: ["192.0.2.1/32"]
   services:
     paperless:
       loadBalancer:
