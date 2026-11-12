@@ -4,7 +4,8 @@ Opt-in: SMOKE_QCOW2=/path/to/fedora-coreos-*-qemu.x86_64.qcow2 pytest tests/test
 Download the image with the coreos-installer container (-s stable -p qemu -f qcow2.xz)
 and `xz -d` it. Uses KVM when /dev/kvm exists. Needs qemu-system-x86_64, qemu-img, ssh, podman.
 The two VMs are joined by a second virtio NIC (QEMU socket netdev) that stands in for the NetBird mesh: ecstasy gets
-100.64.0.1/10, coke the address that apps/authentik publishes on (100.64.0.0/10). Everything else is the real repo content.
+Traefik's mesh address and its public address (both read from apps/traefik/traefik.container, so its PublishPorts can bind),
+coke the address that apps/authentik publishes on. Everything else is the real repo content.
 """
 import ipaddress
 import json
@@ -26,6 +27,11 @@ QCOW2 = os.environ.get("SMOKE_QCOW2")
 pytestmark = pytest.mark.skipif(not QCOW2, reason="set SMOKE_QCOW2 to run the QEMU smoke test")
 
 REPO = "https://github.com/example/coreos-nodes"
+
+# Traefik's own PublishPort lines name the addresses ecstasy's VM must own (public entrypoints, mesh entrypoint).
+_TRAEFIK = (ROOT / "apps" / "traefik" / "traefik.container").read_text()
+PUBLIC_IP = re.search(r"(?m)^PublishPort=([\d.]+):443:443$", _TRAEFIK).group(1)
+ECSTASY_MESH = re.search(r"(?m)^PublishPort=([\d.]+):443:8443$", _TRAEFIK).group(1)
 
 
 def free_port():
@@ -108,7 +114,9 @@ def mesh_port():
 
 @pytest.fixture(scope="module")
 def vm(tmp_path_factory, mesh_port):
-    yield from boot(tmp_path_factory, "ecstasy", f"socket,id=mesh,listen=127.0.0.1:{mesh_port}")
+    for v in boot(tmp_path_factory, "ecstasy", f"socket,id=mesh,listen=127.0.0.1:{mesh_port}"):
+        join_mesh(v, ECSTASY_MESH, PUBLIC_IP)  # before any app: Traefik cannot bind its PublishPorts without both addresses
+        yield v
 
 
 @pytest.fixture(scope="module")
@@ -123,12 +131,14 @@ def mesh_address():
     return publish.group(1)
 
 
-def join_mesh(vm, address):
-    """Give the mesh NIC its address (what the NetBird client would do with wt0)."""
+def join_mesh(vm, address, *extra):
+    """Give the mesh NIC its address (what the NetBird client would do with wt0) plus optional extra /32 addresses."""
     ssh = vm["ssh"]
     dev = ssh("sh", "-c", f"ip -o link | grep -i {MESH_MAC[vm['node']]} | cut -d: -f2 | tr -d ' '").stdout.strip()
     assert dev, "no mesh NIC"
     ssh("sudo", "ip", "addr", "add", f"{address}/10", "dev", dev)
+    for a in extra:
+        ssh("sudo", "ip", "addr", "add", f"{a}/32", "dev", dev)
     ssh("sudo", "ip", "link", "set", dev, "up")
 
 
@@ -266,11 +276,12 @@ def test_secrets_sync_renders_netbird_env_and_restarts_unit(vm, tmp_path, real_t
 
 NB_HOST = "netbird.service.veronoi.cc"
 AUTH_HOST = "auth.service.veronoi.cc"
+PAPERLESS_HOST = "paperless.service.veronoi.cc"
 NB_UNITS = ("netbird-server.service", "netbird-dashboard.service")
 BACKEND_UNITS = ("traefik.service", *NB_UNITS)
 AK_UNITS = ("authentik-postgres.service", "authentik-server.service", "authentik-worker.service")
+PAPERLESS_UNITS = ("paperless-valkey.service", "paperless.service")
 CONFIG = "/var/data/netbird-server/config.yaml"
-ECSTASY_MESH = "100.64.0.1"
 PAT_PASSWORD = "Smoke-Passw0rd!"
 
 
@@ -320,6 +331,19 @@ def run_recipe(recipe, src, tmp_path, real_tools, node, node_pub):
     return admin
 
 
+def encrypt_env(real_tools, tmp_path, pub, dest, text):
+    """Encrypt a throwaway dotenv to a fresh admin key plus the VM's own public key (as the netbird.env test does)."""
+    admin = tmp_path / f"admin-{dest.name}.key"
+    subprocess.run([real_tools.age_keygen, "-o", admin], check=True, capture_output=True)
+    admin_pub = subprocess.run([real_tools.age_keygen, "-y", admin], check=True, capture_output=True, text=True).stdout.strip()
+    plain = tmp_path / f"plain-{dest.name}"
+    plain.write_text(text)
+    subprocess.run(
+        [real_tools.sops, "--encrypt", "--age", f"{admin_pub},{pub}", "--input-type", "dotenv", "--output-type", "dotenv", "--output", dest, plain],
+        env={**os.environ, "HOME": str(tmp_path)}, cwd=tmp_path, check=True, capture_output=True,  # cwd: no .sops.yaml rule for temp paths
+    )
+
+
 def wait_for(fn, what, timeout=300, every=5):
     deadline = time.time() + timeout
     while True:
@@ -345,12 +369,13 @@ def wait_active(vm, names, timeout=300):
         pytest.fail(f"not active: {unit_props(vm, names, 'ActiveState')}\n{logs}")
 
 
-def curl(vm, host, *args, ip="127.0.0.1"):
+def curl(vm, host, *args, ip=PUBLIC_IP):
+    """curl through Traefik: ip=PUBLIC_IP is the websecure entrypoint, ip=ECSTASY_MESH the mesh entrypoint."""
     return vm["ssh"]("curl", "-sk", "--max-time", "10", "--resolve", f"{host}:443:{ip}", *args, check=False).stdout
 
 
-def code(vm, host, path, *args):
-    return curl(vm, host, "-o", "/dev/null", "-w", "%{http_code}", *args, f"https://{host}{path}")
+def code(vm, host, path, *args, ip=PUBLIC_IP):
+    return curl(vm, host, "-o", "/dev/null", "-w", "%{http_code}", *args, f"https://{host}{path}", ip=ip)
 
 
 def test_ecstasy_apps_are_declarative(vm, tmp_path, real_tools):
@@ -358,9 +383,24 @@ def test_ecstasy_apps_are_declarative(vm, tmp_path, real_tools):
     ssh = vm["ssh"]
     sudo = lambda *a, **k: ssh("sudo", *a, **k)  # noqa: E731
     src = make_src(tmp_path, "ecstasy")
-    assert 'APPS_LIST="traefik netbird authentik-route"' in sudo("cat", "/etc/apps-sync.env").stdout
+    assert 'APPS_LIST="traefik netbird authentik-route paperless-route"' in sudo("cat", "/etc/apps-sync.env").stdout
+    pub = sudo("cat", "/var/data/secrets/age.pub").stdout.strip()
 
-    # 1. apps only (authentik-route held back): files deployed, README not, units gated, Traefik runs, shared network and volumes exist
+    # 0. Traefik needs its Cloudflare token (EnvironmentFile) to start: render a dummy one first, so it starts without a retry loop
+    # (NRestarts stays 0). The units column is "-" for this one sync: traefik.service is not deployed yet and cannot be restarted.
+    ecstasy_secrets = src / "secrets" / "ecstasy"
+    encrypt_env(real_tools, tmp_path, pub, ecstasy_secrets / "traefik.env.sops", "CF_DNS_API_TOKEN=dummy\n")
+    targets = ecstasy_secrets / "targets.conf"
+    real_targets = targets.read_text()
+    targets.write_text(re.sub(r"(?m)^(traefik\.env\.sops\s.*\s)traefik\.service$", r"\1-", real_targets))
+    assert targets.read_text() != real_targets
+    put_repo_secrets(vm, src)
+    r = ssh(*SYNC, check=False)
+    assert r.returncode == 0, r.stderr
+    assert sudo("stat", "-c", "%a %U", "/var/data/secrets/traefik.env").stdout.strip() == "600 root"
+    targets.write_text(real_targets)  # from here on the real manifest: the unchanged file is neither rewritten nor restarts Traefik
+
+    # 1. apps only (authentik-route, paperless-route held back): files deployed, README not, units gated, Traefik runs, shared network and volumes exist
     push(vm, src)
     r = ssh(*apps_sync_cmd("traefik netbird"), check=False)
     assert r.returncode == 0, r.stderr
@@ -380,7 +420,6 @@ def test_ecstasy_apps_are_declarative(vm, tmp_path, real_tools):
     assert code(vm, AUTH_HOST, "/") == "404"
 
     # 2. the README recipe against the VM's real age key
-    pub = sudo("cat", "/var/data/secrets/age.pub").stdout.strip()
     run_recipe(readme_recipe("netbird", "printf 'server:"), src, tmp_path, real_tools, "ecstasy", pub)
     assert [p.name for p in (src / "secrets" / "ecstasy").glob("netbird-server*")] == ["netbird-server.yaml.sops"]
     assert "authSecret: ENC[" in (src / "secrets" / "ecstasy" / "netbird-server.yaml.sops").read_text()
@@ -409,8 +448,13 @@ def test_ecstasy_apps_are_declarative(vm, tmp_path, real_tools):
     ws = curl(vm, NB_HOST, "--http1.1", "-i", "--max-time", "5", "-H", "Connection: Upgrade", "-H", "Upgrade: websocket", "-H", "Sec-WebSocket-Version: 13",
               "-H", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", f"https://{NB_HOST}/relay")
     assert ws.startswith("HTTP/1.1 101"), ws[:200]
-    redirect = ssh("curl", "-s", "-o", "/dev/null", "-w", "%{http_code} %{redirect_url}", "-H", f"Host: {NB_HOST}", "http://127.0.0.1/").stdout
+    redirect = ssh("curl", "-s", "-o", "/dev/null", "-w", "%{http_code} %{redirect_url}", "-H", f"Host: {NB_HOST}", f"http://{PUBLIC_IP}/").stdout
     assert redirect.split()[0] in {"301", "308"} and redirect.split()[1] == f"https://{NB_HOST}/", redirect
+    # the mesh entrypoint serves netbird too; neither listener exists on the other address
+    assert code(vm, NB_HOST, "/", ip=ECSTASY_MESH) == "200"
+    assert code(vm, NB_HOST, "/api/users", ip=ECSTASY_MESH) in {"401", "403"}
+    for url in (f"http://{ECSTASY_MESH}/", f"https://{PUBLIC_IP}:8443/", "http://127.0.0.1/"):
+        assert ssh("curl", "-sk", "-o", "/dev/null", "--max-time", "5", url, check=False).returncode in {7, 28}, url
 
     # 5. named volumes hold the state; Traefik handled acme-dns.json itself (no root mkdir/chmod anywhere)
     mount = sudo("podman", "volume", "inspect", "-f", "{{.Mountpoint}}", "traefik-letsencrypt").stdout.strip()
@@ -435,6 +479,11 @@ def test_ecstasy_apps_are_declarative(vm, tmp_path, real_tools):
     wait_for(lambda: code(vm, AUTH_HOST, "/") == "404", "the route to disappear", 60, 2)
     ssh(*apps_sync_cmd())
     wait_for(lambda: code(vm, AUTH_HOST, "/") in {"502", "504"}, "the route to come back", 60, 2)
+    # paperless-route: the main router is mesh-only (404 on the public entrypoint, even with the route loaded), only /share/ is public
+    wait_for(lambda: code(vm, PAPERLESS_HOST, "/", ip=ECSTASY_MESH) in {"502", "504"}, "the paperless route on the mesh entrypoint", 60, 2)
+    assert code(vm, PAPERLESS_HOST, "/") == "404"
+    assert code(vm, PAPERLESS_HOST, "/share/smoke/") in {"502", "504"}
+    assert unit_props(vm, ("traefik.service",), "NRestarts") == {"traefik.service": "NRestarts=0"}
 
     # 7. second sync of both restarts nothing
     before = unit_props(vm, BACKEND_UNITS, "ActiveEnterTimestampMonotonic")
@@ -483,8 +532,7 @@ def test_coke_runs_authentik_behind_ecstasys_traefik(vm, coke, tmp_path, real_to
     mesh = mesh_address()
     assert ipaddress.ip_address(mesh) in ipaddress.ip_network("100.64.0.0/10")
     assert ssh("hostname").stdout.strip() == f"coke.{coke['domain']}"
-    assert 'APPS_LIST="authentik"' in sudo("cat", "/etc/apps-sync.env").stdout
-    join_mesh(vm, ECSTASY_MESH)
+    assert 'APPS_LIST="authentik paperless"' in sudo("cat", "/etc/apps-sync.env").stdout  # = apps: of nodes/coke.yml
     join_mesh(coke, mesh)
     assert ssh("curl", "-s", "-o", "/dev/null", "--max-time", "2", f"http://{mesh}:9", check=False).returncode in {7, 28}  # coke's own address, nothing listens
     src = make_src(tmp_path, "coke")
@@ -494,13 +542,13 @@ def test_coke_runs_authentik_behind_ecstasys_traefik(vm, coke, tmp_path, real_to
     r = ssh(*apps_sync_cmd(), check=False)
     assert r.returncode == 0, r.stderr
     d = "/etc/containers/systemd/apps"
-    assert ssh("ls", d).stdout.split() == ["authentik"]
+    assert ssh("ls", d).stdout.split() == ["authentik", "paperless"]
     ssh("test", "!", "-e", f"{d}/authentik/README.md")
-    for state in unit_props(coke, AK_UNITS, "ConditionResult").values():
+    for state in unit_props(coke, (*AK_UNITS, *PAPERLESS_UNITS), "ConditionResult").values():
         assert state == "ConditionResult=no", state
     assert unit_props(coke, ("netbird.service",), "ConditionResult") == {"netbird.service": "ConditionResult=no"}
     vols = sudo("podman", "volume", "ls", "--format", "{{.Name}}").stdout.split()
-    assert {"authentik-postgres", "authentik-data", "authentik-certs"} <= set(vols), vols
+    assert {"authentik-postgres", "authentik-data", "authentik-certs", "paperless-data", "paperless-media"} <= set(vols), vols
     assert sudo("systemctl", "is-active", "traefik.service", check=False).stdout.strip() != "active"
 
     # 2. node key, then the README recipe encrypts to admin + coke's own key
@@ -509,11 +557,21 @@ def test_coke_runs_authentik_behind_ecstasys_traefik(vm, coke, tmp_path, real_to
     pub = sudo("cat", "/var/data/secrets/age.pub").stdout.strip()
     admin = run_recipe(readme_recipe("authentik", "p=$("), src, tmp_path, real_tools, "coke", pub)
     assert [p.name for p in (src / "secrets" / "coke").iterdir() if p.suffix == ".sops"] == ["authentik.env.sops"]
+    # the worker is also gated on authentik-paperless.env (the Paperless blueprint's client secret): a dummy one, so it starts.
+    # paperless.env is deliberately not rendered: the Paperless units must stay skipped (no image pull, no 4 GB RAM on top).
+    encrypt_env(real_tools, tmp_path, pub, src / "secrets" / "coke" / "authentik-paperless.env.sops",
+                "AUTHENTIK_PAPERLESS_CLIENT_SECRET=smoke-not-the-real-secret\n")
     push(coke, src)
     r = ssh(*SYNC, check=False)
     assert r.returncode == 0, r.stderr
     assert "skipping netbird.env.sops" in r.stderr
     assert sudo("stat", "-c", "%a %U:%G", "/var/data/secrets/authentik.env").stdout.strip() == "600 root:root"
+    assert "skipping paperless.env.sops" in r.stderr
+    assert sudo("stat", "-c", "%a %U:%G", "/var/data/secrets/authentik-paperless.env").stdout.strip() == "600 root:root"
+    sudo("test", "!", "-e", "/var/data/secrets/paperless.env")
+    for u, state in unit_props(coke, PAPERLESS_UNITS, "ConditionResult").items():
+        assert state == "ConditionResult=no", (u, state)
+    assert set(unit_props(coke, PAPERLESS_UNITS, "ActiveState").values()) == {"ActiveState=inactive"}
     plain = subprocess.run([real_tools.sops, "--decrypt", "--input-type", "dotenv", "--output-type", "dotenv", src / "secrets" / "coke" / "authentik.env.sops"],
                            env={**os.environ, "SOPS_AGE_KEY_FILE": str(admin), "HOME": str(tmp_path)}, cwd=src, capture_output=True, text=True, check=True).stdout
     env = dict(l.split("=", 1) for l in plain.splitlines())
@@ -529,16 +587,19 @@ def test_coke_runs_authentik_behind_ecstasys_traefik(vm, coke, tmp_path, real_to
     listeners = ssh("sudo", "ss", "-Hltn", "sport = :9000").stdout.split("\n")
     addrs = {l.split()[3] for l in listeners if l.strip()}
     assert addrs == {f"{mesh}:9000"}, addrs
-    other = ssh("sh", "-c", f"ip -4 -o addr show scope global | awk '{{print $4}}' | cut -d/ -f1 | grep -v '^100\\.64\\.'").stdout.split()
+    other = ssh("sh", "-c", f"ip -4 -o addr show scope global | awk '{{print $4}}' | cut -d/ -f1 | grep -vxF {mesh}").stdout.split()
     assert other, "no other address on coke"
     for ip in other + ["127.0.0.1"]:
         assert ssh("curl", "-s", "-o", "/dev/null", "--max-time", "5", f"http://{ip}:9000/", check=False).returncode in {7, 28}, ip
 
     # 5. the blueprint was applied: the NetBird application answers OIDC discovery; the proxy headers (we are in the trusted mesh range)
     issuer = f"https://{AUTH_HOST}/application/o/netbird/"
-    disco = lambda: ssh("curl", "-s", "--max-time", "5", "-H", f"Host: {AUTH_HOST}", "-H", "X-Forwarded-Proto: https", f"http://{mesh}:9000/application/o/netbird/.well-known/openid-configuration", check=False).stdout  # noqa: E731
+    disco = lambda app="netbird": ssh("curl", "-s", "--max-time", "5", "-H", f"Host: {AUTH_HOST}", "-H", "X-Forwarded-Proto: https", f"http://{mesh}:9000/application/o/{app}/.well-known/openid-configuration", check=False).stdout  # noqa: E731
     wait_for(lambda: disco().startswith("{"), "the blueprint to be applied (OIDC discovery of the netbird application)", 400, 10)
     assert json.loads(disco())["issuer"] == issuer
+    # the Paperless blueprint (client secret from authentik-paperless.env via !Env) is applied by the same worker
+    wait_for(lambda: disco("paperless").startswith("{"), "the Paperless blueprint to be applied", 400, 10)
+    assert json.loads(disco("paperless"))["issuer"] == f"https://{AUTH_HOST}/application/o/paperless/"
     # the client secret from the encrypted env reached the provider via !Env: right secret accepted, wrong one refused
     token = lambda secret: ssh("curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "10", "-X", "POST", "-d", "grant_type=client_credentials", "-d", "client_id=netbird", "-d", f"client_secret={secret}",  # noqa: E731
                                "-H", f"Host: {AUTH_HOST}", "-H", "X-Forwarded-Proto: https", f"http://{mesh}:9000/application/o/token/", check=False).stdout
@@ -548,12 +609,13 @@ def test_coke_runs_authentik_behind_ecstasys_traefik(vm, coke, tmp_path, real_to
     # 6. the whole path from ecstasy: Traefik (TLS, certificate request fails offline -> default cert) -> mesh -> Authentik
     probe = lambda path: curl(vm, AUTH_HOST, f"https://{AUTH_HOST}{path}")  # noqa: E731
     assert code(vm, AUTH_HOST, "/-/health/live/") in {"200", "204"}
+    assert code(vm, AUTH_HOST, "/-/health/live/", ip=ECSTASY_MESH) in {"200", "204"}  # auth is on both entrypoints
     via = json.loads(wait_for(lambda: (lambda b: b if b.startswith("{") else None)(probe("/application/o/netbird/.well-known/openid-configuration")), "discovery through Traefik", 60, 3))
     assert via["issuer"] == issuer  # X-Forwarded-Proto/Host passed on and trusted
     assert via["authorization_endpoint"] == f"https://{AUTH_HOST}/application/o/authorize/"
     assert json.loads(probe("/application/o/netbird/jwks/"))["keys"][0]["alg"] == "RS256"
     assert code(vm, AUTH_HOST, "/if/flow/initial-setup/") == "200"
-    redirect = vm["ssh"]("curl", "-s", "-o", "/dev/null", "-w", "%{http_code} %{redirect_url}", "-H", f"Host: {AUTH_HOST}", "http://127.0.0.1/").stdout
+    redirect = vm["ssh"]("curl", "-s", "-o", "/dev/null", "-w", "%{http_code} %{redirect_url}", "-H", f"Host: {AUTH_HOST}", f"http://{PUBLIC_IP}/").stdout
     assert redirect.split()[0] in {"301", "308"} and redirect.split()[1] == f"https://{AUTH_HOST}/", redirect
 
 
