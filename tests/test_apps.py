@@ -188,7 +188,6 @@ def traefik_flags():
 
 PUBLIC_IP, MESH_IP = "176.65.149.212", "100.127.17.6"  # ecstasy: ens18 and wt0 (the NetBird mesh address of the peer)
 SERVICE_ZONE = "service.veronoi.cc"  # Cloudflare wildcard -> public IP; NetBird zone wildcard -> mesh IP for mesh peers
-PUBLIC_EXCEPTIONS = {"netbird.veronoi.cc", "auth.veronoi.cc"}  # public, keep their names, certificate via TLS-ALPN
 
 
 def test_traefik_static_config():
@@ -211,10 +210,9 @@ def test_traefik_static_config():
     assert f["providers.file.directory"] == "/etc/traefik/apps"
     assert not [k for k in f if k.startswith("providers.") and k != "providers.file.directory"]  # no docker provider
     assert not any("email" in k for k in f), "no ACME email: nothing personal in a public repo"
-    assert f["certificatesresolvers.letsencrypt.acme.storage"] == "/letsencrypt/acme.json"
-    assert f["certificatesresolvers.letsencrypt.acme.tlschallenge"] == "true"
+    assert not [k for k in f if k.startswith("certificatesresolvers.letsencrypt.")], "the TLS-ALPN resolver is gone: every host is a wildcard host"
     dns = "certificatesresolvers.letsencrypt-dns.acme."
-    assert f[dns + "storage"] == "/letsencrypt/acme-dns.json"  # not shared with the TLS-ALPN resolver
+    assert f[dns + "storage"] == "/letsencrypt/acme-dns.json"
     assert f[dns + "dnschallenge.provider"] == "cloudflare"
     # public resolvers: the propagation check must not ask the NetBird zone that answers the same names privately
     assert f[dns + "dnschallenge.resolvers"] == "1.1.1.1:53,8.8.8.8:53"
@@ -244,20 +242,16 @@ def check_router(name, r):
     """The domain scheme (README.md, Domain scheme). Every router names its entry points: `mesh` is Traefik's default, so a
     forgotten entryPoints would still be private, but an explicit list is what a reviewer can read. `<x>.service` hosts
     are `[mesh]` (mesh only), `[websecure, mesh]` (public) or `[websecure]` only with a path restriction in the rule, with
-    the wildcard certificate; anything else must be a public exception."""
+    the wildcard certificate; any other host is rejected (no exceptions)."""
     eps = r.get("entryPoints")
     assert eps and set(eps) <= {"websecure", "mesh"} and len(set(eps)) == len(eps), f"{name}: entryPoints must be explicit"
     hosts = re.findall(r"Host\(`([^`]+)`\)", r["rule"])
     assert hosts, f"{name}: certificates are requested per Host rule"
     for h in hosts:
-        if h.endswith("." + SERVICE_ZONE):
-            assert "." not in h[: -len(SERVICE_ZONE) - 1], f"{name}: {h} is not covered by *.{SERVICE_ZONE}"
-            assert "mesh" in eps or PATH_RESTRICTION.search(r["rule"]), f"{name}: {h} on websecure alone needs a path restriction"
-            assert r["tls"] == {"certResolver": "letsencrypt-dns", "domains": [{"main": f"*.{SERVICE_ZONE}"}]}, name
-        else:  # a name outside the scheme is public by definition: it cannot resolve on the mesh zone
-            assert h in PUBLIC_EXCEPTIONS, f"{name}: {h} is neither *.{SERVICE_ZONE} nor a public exception"
-            assert eps == ["websecure"] and r["tls"] == {"certResolver": "letsencrypt"}, name
-    assert len(set(hosts)) == 1 or all(h.endswith("." + SERVICE_ZONE) for h in hosts), f"{name}: mixed hosts"
+        assert h.endswith("." + SERVICE_ZONE), f"{name}: {h} is not directly under *.{SERVICE_ZONE}"
+        assert "." not in h[: -len(SERVICE_ZONE) - 1], f"{name}: {h} is not covered by *.{SERVICE_ZONE}"
+        assert "mesh" in eps or PATH_RESTRICTION.search(r["rule"]), f"{name}: {h} on websecure alone needs a path restriction"
+        assert r["tls"] == {"certResolver": "letsencrypt-dns", "domains": [{"main": f"*.{SERVICE_ZONE}"}]}, name
 
 
 def check_mesh_coverage(routers):
@@ -283,9 +277,9 @@ def _tls(zone):
     ("Host(`a.service.veronoi.cc`)", ["mesh"], _tls("veronoi.cc"), False),  # wrong wildcard
     ("Host(`a.service.veronoi.cc`)", ["websecure", "mesh"], {"certResolver": "letsencrypt"}, False),
     ("Host(`a.b.service.veronoi.cc`)", ["mesh"], _tls(SERVICE_ZONE), False),  # not covered by the wildcard
-    ("Host(`netbird.veronoi.cc`)", ["websecure"], {"certResolver": "letsencrypt"}, True),
-    ("Host(`auth.veronoi.cc`)", ["websecure"], {"certResolver": "letsencrypt"}, True),
-    ("Host(`auth.veronoi.cc`)", ["websecure", "mesh"], {"certResolver": "letsencrypt"}, False),
+    ("Host(`netbird.veronoi.cc`)", ["websecure"], {"certResolver": "letsencrypt"}, False),  # no exceptions any more
+    ("Host(`auth.veronoi.cc`)", ["websecure"], {"certResolver": "letsencrypt"}, False),
+    ("Host(`auth.veronoi.cc`)", ["websecure", "mesh"], _tls(SERVICE_ZONE), False),
     ("Host(`other.veronoi.cc`)", ["websecure"], {"certResolver": "letsencrypt"}, False),
 ])
 def test_check_router_domain_scheme(rule, eps, tls, ok):
@@ -364,7 +358,7 @@ def test_foreign_yaml_is_never_on_a_traefik_node():
 def test_netbird_routes():
     cfg = load_routes(APPS / "netbird" / "routes.yml")["http"]
     rt, sv = cfg["routers"], cfg["services"]
-    host = "netbird.veronoi.cc"
+    host = "netbird.service.veronoi.cc"
     grpc = rt["netbird-grpc"]["rule"]
     assert f"Host(`{host}`)" in grpc
     for path in ("/signalexchange.SignalExchange/", "/management.ManagementService/"):
@@ -381,20 +375,14 @@ def test_netbird_routes():
     assert url("netbird-dashboard") == "http://netbird-dashboard:80"
 
 
-def test_netbird_service_host_twins():
-    """Every netbird.veronoi.cc router has a twin for netbird.service.veronoi.cc: same rule apart from the host, same service,
-    middlewares and priority; public + mesh with the wildcard certificate (cutover step 1, the old host stays until step 2)."""
+def test_netbird_routers_are_public_and_mesh():
+    """All three routers sit on netbird.service.veronoi.cc, public + mesh, wildcard certificate; nothing else is routed."""
     rt = load_routes(APPS / "netbird" / "routes.yml")["http"]["routers"]
-    old = {n: r for n, r in rt.items() if "Host(`netbird.veronoi.cc`)" in r["rule"]}
-    assert len(old) == 3
-    for n, r in old.items():
-        rule = r["rule"].replace("netbird.veronoi.cc", "netbird.service.veronoi.cc")
-        twins = [t for t in rt.values() if t is not r and t["rule"] == rule]
-        assert len(twins) == 1, n
-        t = twins[0]
-        assert t["service"] == r["service"] and t.get("middlewares") == r.get("middlewares") and t.get("priority") == r.get("priority"), n
-        assert t["entryPoints"] == ["websecure", "mesh"], n
-        check_router(n, t)
+    assert set(rt) == {"netbird-grpc", "netbird-backend", "netbird-dashboard"}
+    for n, r in rt.items():
+        assert r["entryPoints"] == ["websecure", "mesh"], n
+        assert re.findall(r"Host\(`([^`]+)`\)", r["rule"]) == ["netbird.service.veronoi.cc"], n
+        check_router(n, r)
     check_mesh_coverage(rt)
 
 
@@ -465,11 +453,11 @@ def test_authentik_is_published_on_the_mesh_address_only():
     # the route on the node that owns the public IP points at the same address
     route = load_routes(APPS / "authentik-route" / "routes.yml")["http"]
     assert route["services"]["authentik"]["loadBalancer"]["servers"] == [{"url": f"http://{ip}:9000"}]
-    assert route["routers"]["authentik"]["rule"] == "Host(`auth.veronoi.cc`)"
-    # transition: the service-zone name routes to the same backend; the old name stays until NetBird's issuer moves
-    assert route["routers"]["authentik-service"]["rule"] == "Host(`auth.service.veronoi.cc`)"
-    assert route["routers"]["authentik-service"]["entryPoints"] == ["websecure", "mesh"]
-    assert route["routers"]["authentik-service"]["service"] == route["routers"]["authentik"]["service"] == "authentik"
+    assert set(route["routers"]) == {"authentik"}
+    assert route["routers"]["authentik"]["rule"] == "Host(`auth.service.veronoi.cc`)"
+    assert route["routers"]["authentik"]["entryPoints"] == ["websecure", "mesh"]
+    assert route["routers"]["authentik"]["service"] == "authentik"
+    check_router("authentik", route["routers"]["authentik"])
     # boot ordering: the client creates the mesh interface; retry forever until it exists
     u = parse_quadlet(APPS / "authentik" / "authentik-server.container")
     assert "netbird.service" in u["Unit"]["After"][0].split() and "netbird.service" in u["Unit"]["Wants"][0].split()
@@ -525,8 +513,8 @@ def test_authentik_blueprint():
     assert not isinstance(provider["signing_key"], str) and provider["signing_key"].tag == "Find"  # RS256 key: Dex verifies via JWKS
     # the redirect URIs are NetBird's embedded Dex callback and logout callback, strict
     assert {(r["matching_mode"], r["url"]) for r in provider["redirect_uris"]} == {
-        ("strict", "https://netbird.veronoi.cc/oauth2/callback"), ("strict", "https://netbird.veronoi.cc/oauth2/logout/callback"),
         ("strict", "https://netbird.service.veronoi.cc/oauth2/callback"), ("strict", "https://netbird.service.veronoi.cc/oauth2/logout/callback")}
+    assert app["attrs"]["meta_launch_url"] == "https://netbird.service.veronoi.cc"
     assert app["identifiers"] == {"slug": "netbird"} and app["attrs"]["provider"].tag == "KeyOf"
     # every !Env variable is in the encrypted env file (README recipe) and in the worker's EnvironmentFile
     envs = {n.value for n in walk(doc) if isinstance(n, _Tag) and n.tag == "Env"}

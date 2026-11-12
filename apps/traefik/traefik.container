@@ -50,8 +50,6 @@ Exec=--log.level=INFO --accesslog=true \
   --entrypoints.mesh.transport.respondingtimeouts.idletimeout=0 \
   --serverstransport.forwardingtimeouts.responseheadertimeout=0s \
   --serverstransport.forwardingtimeouts.idleconntimeout=0s \
-  --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json \
-  --certificatesresolvers.letsencrypt.acme.tlschallenge=true \
   --certificatesresolvers.letsencrypt-dns.acme.storage=/letsencrypt/acme-dns.json \
   --certificatesresolvers.letsencrypt-dns.acme.dnschallenge.provider=cloudflare \
   --certificatesresolvers.letsencrypt-dns.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53

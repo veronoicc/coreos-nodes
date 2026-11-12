@@ -1,30 +1,9 @@
-# Traefik routes for netbird.veronoi.cc (loaded by apps/traefik, see its README). Synced by apps-sync; no secrets here.
+# Traefik routes for netbird.service.veronoi.cc (public + mesh, wildcard certificate; loaded by apps/traefik, see its README).
+# Synced by apps-sync; no secrets here.
 # Paths per https://docs.netbird.io/selfhosted/external-reverse-proxy (combined container).
 http:
   routers:
     netbird-grpc:
-      rule: Host(`netbird.veronoi.cc`) && (PathPrefix(`/signalexchange.SignalExchange/`) || PathPrefix(`/management.ManagementService/`))
-      entryPoints: [websecure]
-      tls:
-        certResolver: letsencrypt
-      service: netbird-server-h2c
-      priority: 100
-    netbird-backend:
-      rule: Host(`netbird.veronoi.cc`) && (PathPrefix(`/relay`) || PathPrefix(`/ws-proxy/`) || PathPrefix(`/api`) || PathPrefix(`/oauth2`))
-      entryPoints: [websecure]
-      tls:
-        certResolver: letsencrypt
-      service: netbird-server
-      priority: 100
-    netbird-dashboard:
-      rule: Host(`netbird.veronoi.cc`)
-      entryPoints: [websecure]
-      tls:
-        certResolver: letsencrypt
-      service: netbird-dashboard
-      priority: 1
-    # Twins on netbird.service.veronoi.cc (public + mesh, wildcard certificate): same rules, services and priorities.
-    netbird-service-grpc:
       rule: Host(`netbird.service.veronoi.cc`) && (PathPrefix(`/signalexchange.SignalExchange/`) || PathPrefix(`/management.ManagementService/`))
       entryPoints: [websecure, mesh]
       tls:
@@ -33,7 +12,7 @@ http:
           - main: "*.service.veronoi.cc"
       service: netbird-server-h2c
       priority: 100
-    netbird-service-backend:
+    netbird-backend:
       rule: Host(`netbird.service.veronoi.cc`) && (PathPrefix(`/relay`) || PathPrefix(`/ws-proxy/`) || PathPrefix(`/api`) || PathPrefix(`/oauth2`))
       entryPoints: [websecure, mesh]
       tls:
@@ -42,7 +21,7 @@ http:
           - main: "*.service.veronoi.cc"
       service: netbird-server
       priority: 100
-    netbird-service-dashboard:
+    netbird-dashboard:
       rule: Host(`netbird.service.veronoi.cc`)
       entryPoints: [websecure, mesh]
       tls:

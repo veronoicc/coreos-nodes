@@ -20,10 +20,6 @@ entries:
       # NetBird's embedded Dex is the OIDC client: its callback is <issuer>/callback, plus the logout callback.
       redirect_uris:
         - matching_mode: strict
-          url: https://netbird.veronoi.cc/oauth2/callback
-        - matching_mode: strict
-          url: https://netbird.veronoi.cc/oauth2/logout/callback
-        - matching_mode: strict
           url: https://netbird.service.veronoi.cc/oauth2/callback
         - matching_mode: strict
           url: https://netbird.service.veronoi.cc/oauth2/logout/callback
@@ -38,4 +34,4 @@ entries:
     attrs:
       name: NetBird
       provider: !KeyOf netbird-provider
-      meta_launch_url: https://netbird.veronoi.cc
+      meta_launch_url: https://netbird.service.veronoi.cc
