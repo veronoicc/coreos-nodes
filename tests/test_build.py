@@ -142,6 +142,9 @@ def test_netbird_quadlet_gated_and_secret_free(ign):
     # traffic to published ports lost its source IP. The base must keep that bit clear.
     base = next(l.split("=", 2)[2] for l in lines if l.startswith("Environment=NB_FWMARK_BASE="))
     assert int(base, 0) & 0x2000 == 0 and int(base, 0) & 0xFF == 0
+    # Nodes serve routes (coke -> printer via Home Assistant): a lazy routing peer is unassigned while it connects and the route
+    # fails with "No route to host", so the node client overrides the account-wide lazy flag.
+    assert "Environment=NB_LAZY_CONN=off" in lines
     # NET_RAW: podman (unlike docker) drops it by default; without it the client fails "failed to create ipv4 raw socket".
     for cap in ("NET_ADMIN", "SYS_ADMIN", "SYS_RESOURCE", "NET_RAW"):
         assert f"AddCapability={cap}" in lines
