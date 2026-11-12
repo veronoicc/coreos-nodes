@@ -452,6 +452,36 @@ def test_authentik_blueprint():
     assert "/var/data/secrets/authentik.env" in containers("authentik")["authentik-worker"]["Container"]["EnvironmentFile"]
 
 
+def test_paperless_blueprint():
+    doc = load_blueprint(APPS / "authentik" / "paperless-blueprint.yaml")
+    assert doc["version"] == 1
+    provider = next(e for e in doc["entries"] if e["model"] == "authentik_providers_oauth2.oauth2provider")["attrs"]
+    app = next(e for e in doc["entries"] if e["model"] == "authentik_core.application")
+    binding = next(e for e in doc["entries"] if e["model"] == "authentik_policies.policybinding")
+    assert provider["client_type"] == "confidential" and provider["client_id"] == "paperless"
+    assert set(provider["grant_types"]) == {"authorization_code", "refresh_token"}
+    assert isinstance(provider["client_secret"], _Tag) and provider["client_secret"].tag == "Env"
+    assert not isinstance(provider["signing_key"], str) and provider["signing_key"].tag == "Find"
+    # django-allauth callback for provider_id `authentik` on the service name, strict; PAPERLESS_URL is the same host
+    assert provider["redirect_uris"] == [
+        {"matching_mode": "strict", "url": "https://paperless.service.veronoi.cc/accounts/oidc/authentik/login/callback/"}]
+    assert app["identifiers"] == {"slug": "paperless"} and app["attrs"]["provider"].tag == "KeyOf"
+    assert app["attrs"]["meta_launch_url"] == env_file(APPS / "paperless" / "settings.env")["PAPERLESS_URL"]
+    # only members of `authentik Admins` may use the application
+    assert binding["identifiers"]["target"].value == ["authentik_core.application", ["slug", "paperless"]]
+    assert binding["attrs"]["group"].value == ["authentik_core.group", ["name", "authentik Admins"]]
+    # the secret comes from the optional extra env file, forwarded by name to the worker only
+    envs = {n.value for n in walk(doc) if isinstance(n, _Tag) and n.tag == "Env"}
+    assert envs == {"AUTHENTIK_PAPERLESS_CLIENT_SECRET"}
+    worker = parse_quadlet(APPS / "authentik" / "authentik-worker.container")
+    assert "paperless-blueprint.yaml:/blueprints/custom/paperless.yaml:ro,z" in "".join(worker["Container"]["Volume"])
+    assert worker["Service"]["EnvironmentFile"] == ["-/var/data/secrets/authentik-paperless.env"]  # optional: "-"
+    assert worker["Container"]["PodmanArgs"] == ["--env AUTHENTIK_PAPERLESS_CLIENT_SECRET"]
+    assert "AUTHENTIK_PAPERLESS" not in (APPS / "authentik" / "authentik-server.container").read_text()
+    file, dest, mode, owner, restart = next(l for l in targets("coke") if l[0] == "authentik-paperless.env.sops")
+    assert (dest, mode, owner, restart) == ("/var/data/secrets/authentik-paperless.env", "0600", "root:root", "authentik-worker.service")
+
+
 def walk(node):
     yield node
     if isinstance(node, dict):
@@ -630,8 +660,8 @@ def test_no_private_keys_or_plaintext_config_in_the_repo():
         if rel.parts[0] not in ("tests",) and p.name != "README.md":
             # plaintext NetBird config / Authentik env would carry these keys with a literal value
             assert not re.search(rb"(?m)^\s*(encryptionKey|authSecret|sessionCookieEncryptionKey):\s*[\"']?[A-Za-z0-9+/=]{16,}", data), rel
-            assert not re.search(rb"(?m)^(AUTHENTIK_SECRET_KEY|POSTGRES_PASSWORD|AUTHENTIK_POSTGRESQL__PASSWORD|AUTHENTIK_NETBIRD_CLIENT_SECRET|PAPERLESS_SECRET_KEY|PAPERLESS_SOCIALACCOUNT_PROVIDERS)=[^E\s]", data), rel
-    for forbidden in (ROOT / "secrets" / "ecstasy" / "config.yaml", ROOT / "secrets" / "coke" / "authentik.env", APPS / "netbird" / "config.yaml"):
+            assert not re.search(rb"(?m)^(AUTHENTIK_SECRET_KEY|POSTGRES_PASSWORD|AUTHENTIK_POSTGRESQL__PASSWORD|AUTHENTIK_NETBIRD_CLIENT_SECRET|AUTHENTIK_PAPERLESS_CLIENT_SECRET|PAPERLESS_SECRET_KEY|PAPERLESS_SOCIALACCOUNT_PROVIDERS)=[^E\s]", data), rel
+    for forbidden in (ROOT / "secrets" / "ecstasy" / "config.yaml", ROOT / "secrets" / "coke" / "authentik.env", ROOT / "secrets" / "coke" / "paperless.env", ROOT / "secrets" / "coke" / "authentik-paperless.env", APPS / "netbird" / "config.yaml"):
         assert not forbidden.exists()
 
 

@@ -40,7 +40,9 @@ browser --443--> ecstasy (176.65.149.212): Traefik, TLS for auth.veronoi.cc (Let
 | `authentik-postgres.volume`, `authentik-data.volume`, `authentik-certs.volume` | PostgreSQL data, `/data` (media), `/certs`. All `# apps-sync: keep`. |
 | `settings.env` | Non-secret settings (database host/user/name, proxy CIDRs, telemetry off). |
 | `netbird-blueprint.yaml` | Declares the NetBird OIDC provider and application. Mounted into the worker as `/blueprints/custom/netbird.yaml`. |
+| `paperless-blueprint.yaml` | Declares the Paperless OIDC provider, application and its binding to the group `authentik Admins`. Mounted into the worker as `/blueprints/custom/paperless.yaml`. See [`apps/paperless/README.md`](../paperless/README.md). |
 | `/var/data/secrets/authentik.env` | secrets-sync, 0600 root: secret key, database password, NetBird client secret. |
+| `/var/data/secrets/authentik-paperless.env` | secrets-sync, 0600 root: `AUTHENTIK_PAPERLESS_CLIENT_SECRET` for the Paperless blueprint. Only the worker reads it, as an **optional** file (`EnvironmentFile=-` in `[Service]` plus `PodmanArgs=--env <name>`, the pattern of Traefik's token): no gate, and without it only the Paperless blueprint fails. Created together with `paperless.env.sops`, whose OIDC client config carries the same value. |
 
 All three units have `ConditionPathExists=/var/data/secrets/authentik.env`: before the first render they are skipped, afterwards
 `secrets-sync` (re)starts them together when the file changes. A custom templates volume is not created (none used); add a
@@ -128,6 +130,11 @@ client id `netbird`, secret from the environment, signing key `authentik Self-si
 `https://auth.veronoi.cc/application/o/netbird/`). No service account or token is needed: NetBird's embedded IdP manager does not call
 the Authentik API. Check: `https://auth.veronoi.cc/application/o/netbird/.well-known/openid-configuration` returns the issuer; the worker log
 (`journalctl -u authentik-worker`) shows the blueprint applied; Admin -> Customization -> Blueprints lists `NetBird`.
+
+`paperless-blueprint.yaml` works the same way: provider `Paperless` (confidential, client id `paperless`, implicit consent, **strict** redirect URI
+`https://paperless.service.veronoi.cc/accounts/oidc/authentik/login/callback/`, no logout redirect entry because Paperless sends the browser to the
+end-session endpoint without `post_logout_redirect_uri`), application `paperless`, and a policy binding that lets only the group `authentik Admins`
+use it (everyone else gets "Permission denied"). Check: `.../application/o/paperless/.well-known/openid-configuration`.
 A blueprint is applied in one transaction: if it fails nothing of it is created, the error is in the Blueprints page and the worker log.
 
 ## Backup

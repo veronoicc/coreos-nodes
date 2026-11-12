@@ -21,9 +21,17 @@ Volume=authentik-certs.volume:/certs
 # Blueprint: declares the NetBird OIDC provider and application (README.md). The worker applies it; its client secret
 # comes from the rendered env file via !Env, nothing secret is in git. No container socket (no outposts).
 Volume=/etc/containers/systemd/apps/authentik/netbird-blueprint.yaml:/blueprints/custom/netbird.yaml:ro,z
+# Blueprint: declares the Paperless OIDC provider, application and its group binding. Its client secret is in the optional
+# authentik-paperless.env (below), forwarded by name only.
+Volume=/etc/containers/systemd/apps/authentik/paperless-blueprint.yaml:/blueprints/custom/paperless.yaml:ro,z
+# AUTHENTIK_PAPERLESS_CLIENT_SECRET (secrets/coke/authentik-paperless.env.sops, see README.md): a name-only --env copies it
+# from the unit's environment (the EnvironmentFile below), so the file stays optional and the worker does not depend on it.
+PodmanArgs=--env AUTHENTIK_PAPERLESS_CLIENT_SECRET
 
 [Service]
 Restart=on-failure
+# Optional ("-"): without the file only the Paperless blueprint fails (!Env finds no value), NetBird login and the rest keep working.
+EnvironmentFile=-/var/data/secrets/authentik-paperless.env
 
 [Install]
 WantedBy=multi-user.target
