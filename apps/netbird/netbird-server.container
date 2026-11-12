@@ -13,7 +13,7 @@ Image=docker.io/netbirdio/netbird-server:0.82.1
 ContainerName=netbird-server
 # Routed by Traefik (routes.yml); the shared network is defined by apps/traefik.
 Network=traefik.network
-# STUN needs direct UDP, it cannot go through the reverse proxy.
+# STUN needs direct UDP, it cannot go through Traefik.
 PublishPort=3478:3478/udp
 Volume=netbird-data.volume:/var/lib/netbird
 Volume=/var/data/netbird-server/config.yaml:/etc/netbird/config.yaml:ro,Z

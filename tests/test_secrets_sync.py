@@ -798,6 +798,5 @@ def test_repo_manifest_for_ecstasy():
             "netbird-server.yaml.sops", "/var/data/netbird-server/config.yaml", "0600", "root:root",
             "netbird-server.service,netbird-dashboard.service",
         ],
-        ["netbird-proxy.env.sops", "/var/data/secrets/netbird-proxy.env", "0600", "root:root", "netbird-proxy.service"],
         ["traefik.env.sops", "/var/data/secrets/traefik.env", "0600", "root:root", "traefik.service"],
     ]
