@@ -842,6 +842,13 @@ def test_scanservjs_static_scanner_and_no_ignored_discovery():
     # discovery stays on: SCANIMAGE_LIST_IGNORE would stop `scanimage -L` (and the UI would list no device) unless DEVICES is set
     assert "SCANIMAGE_LIST_IGNORE" not in "".join(l for l in (APPS / "scanservjs" / "scanservjs.container").read_text().splitlines() if not l.startswith("#"))
     assert c["Volume"][0] == "/etc/containers/systemd/apps/scanservjs/config.local.js:/etc/scanservjs/config.local.js:ro,z"
+    # sane-airscan 0.99.35 drops even the static [devices] entry when mDNS discovery cannot start (no avahi daemon in the
+    # container: "MDNS: avahi_client_new failed", then no scanner listed). discovery = disable keeps only static devices; it
+    # comes as a drop-in so the image's entrypoint can still rewrite airscan.conf from AIRSCAN_DEVICES.
+    dropin = "/etc/containers/systemd/apps/scanservjs/airscan-static.conf:/etc/sane.d/airscan.d/static.conf:ro,z"
+    assert dropin in c["Volume"]
+    conf = (APPS / "scanservjs" / "airscan-static.conf").read_text().splitlines()
+    assert "[options]" in conf and "discovery = disable" in conf
 
 
 def test_scanservjs_config_local_js():

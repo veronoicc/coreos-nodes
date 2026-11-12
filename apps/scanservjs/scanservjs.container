@@ -21,6 +21,8 @@ AddHost=printer.device:10.0.0.34
 EnvironmentFile=/etc/containers/systemd/apps/scanservjs/settings.env
 # Mounted as a single file: the rest of /etc/scanservjs (config.default.js, the template) stays as the image ships it.
 Volume=/etc/containers/systemd/apps/scanservjs/config.local.js:/etc/scanservjs/config.local.js:ro,z
+# Static devices only (no mDNS/WSD discovery): without it sane-airscan lists no scanner here, see airscan-static.conf.
+Volume=/etc/containers/systemd/apps/scanservjs/airscan-static.conf:/etc/sane.d/airscan.d/static.conf:ro,z
 # Output directory of scanservjs = Paperless's consume folder (apps/paperless/paperless-consume.volume). :z because two
 # containers (different SELinux categories) share it.
 Volume=paperless-consume.volume:/var/lib/scanservjs/output:z

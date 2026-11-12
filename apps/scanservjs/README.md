@@ -33,8 +33,10 @@ is scanservjs's own 8080.
   one `sed -i "/^\[devices\]/a <entry>"` per entry. `"HP Smart Tank 580" = "http://printer.device:8080/eSCL"` ends up as exactly that line, which is
   sane-airscan's `"name" = "url"` syntax (the protocol defaults to eSCL). `settings.env` is read raw by podman, so the quotes arrive unchanged (both
   steps were run against this value with a Debian `sh`: the line is inserted as written).
-- **No dbus/avahi is needed** with a static device: mDNS does not cross the container network anyway. Without avahi, `scanimage -L`
-  waits at most sane-airscan's 5 s discovery timeout (`ZEROCONF_READY_TIMEOUT 5000` in `airscan-zeroconf.c`) and still lists the static device.
+- **No dbus/avahi is needed**, but discovery must be off: without an avahi daemon, sane-airscan 0.99.35 lists **no** scanner, not even the
+  static one (`MDNS: avahi_client_new failed: Daemon not running`, then "No scanners were identified"; observed on coke). The drop-in
+  `airscan-static.conf` (mounted as `/etc/sane.d/airscan.d/static.conf`) sets `discovery = disable`; then `scanimage -L` lists
+  `airscan:e0:HP Smart Tank 580`. It is a drop-in because the image's entrypoint rewrites `airscan.conf` from `AIRSCAN_DEVICES`.
 - `SCANIMAGE_LIST_IGNORE` is **not** set: it disables `scanimage -L` (`app-server/src/classes/config.js:268`) and the UI would list no device.
 - `printer.device` is pinned with `AddHost=printer.device:10.0.0.34` (the container's resolver does not know the LAN name).
 - The scanner is reached from coke over the NetBird mesh. **NetBird policy needed: coke -> Printer, TCP 8080** (the eSCL port; port 80 is only the
