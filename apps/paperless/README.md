@@ -2,7 +2,7 @@
 
 Paperless-ngx 3.4 (web server + consumer in one container, Valkey broker, SQLite) on **coke** (`apps: [authentik, paperless]` in
 `nodes/coke.yml`). Reachable at `https://paperless.service.veronoi.cc`, **public + mesh** (domain scheme: root [README](../../README.md),
-Domain scheme), and login only through Authentik (`auth.veronoi.cc`, OIDC). Declarative: Quadlets and settings via `apps-sync`,
+Domain scheme), and login only through Authentik (`auth.service.veronoi.cc`, OIDC). Declarative: Quadlets and settings via `apps-sync`,
 secrets as `secrets/coke/paperless.env.sops` via `secrets-sync`. Generic mechanics: root README.
 
 ## Topology
