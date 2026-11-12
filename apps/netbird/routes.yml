@@ -23,6 +23,34 @@ http:
         certResolver: letsencrypt
       service: netbird-dashboard
       priority: 1
+    # Twins on netbird.service.veronoi.cc (public + mesh, wildcard certificate): same rules, services and priorities.
+    netbird-service-grpc:
+      rule: Host(`netbird.service.veronoi.cc`) && (PathPrefix(`/signalexchange.SignalExchange/`) || PathPrefix(`/management.ManagementService/`))
+      entryPoints: [websecure, mesh]
+      tls:
+        certResolver: letsencrypt-dns
+        domains:
+          - main: "*.service.veronoi.cc"
+      service: netbird-server-h2c
+      priority: 100
+    netbird-service-backend:
+      rule: Host(`netbird.service.veronoi.cc`) && (PathPrefix(`/relay`) || PathPrefix(`/ws-proxy/`) || PathPrefix(`/api`) || PathPrefix(`/oauth2`))
+      entryPoints: [websecure, mesh]
+      tls:
+        certResolver: letsencrypt-dns
+        domains:
+          - main: "*.service.veronoi.cc"
+      service: netbird-server
+      priority: 100
+    netbird-service-dashboard:
+      rule: Host(`netbird.service.veronoi.cc`)
+      entryPoints: [websecure, mesh]
+      tls:
+        certResolver: letsencrypt-dns
+        domains:
+          - main: "*.service.veronoi.cc"
+      service: netbird-dashboard
+      priority: 1
   services:
     netbird-server:
       loadBalancer:

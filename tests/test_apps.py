@@ -381,6 +381,23 @@ def test_netbird_routes():
     assert url("netbird-dashboard") == "http://netbird-dashboard:80"
 
 
+def test_netbird_service_host_twins():
+    """Every netbird.veronoi.cc router has a twin for netbird.service.veronoi.cc: same rule apart from the host, same service,
+    middlewares and priority; public + mesh with the wildcard certificate (cutover step 1, the old host stays until step 2)."""
+    rt = load_routes(APPS / "netbird" / "routes.yml")["http"]["routers"]
+    old = {n: r for n, r in rt.items() if "Host(`netbird.veronoi.cc`)" in r["rule"]}
+    assert len(old) == 3
+    for n, r in old.items():
+        rule = r["rule"].replace("netbird.veronoi.cc", "netbird.service.veronoi.cc")
+        twins = [t for t in rt.values() if t is not r and t["rule"] == rule]
+        assert len(twins) == 1, n
+        t = twins[0]
+        assert t["service"] == r["service"] and t.get("middlewares") == r.get("middlewares") and t.get("priority") == r.get("priority"), n
+        assert t["entryPoints"] == ["websecure", "mesh"], n
+        check_router(n, t)
+    check_mesh_coverage(rt)
+
+
 # --------------------------------------------------------------- netbird
 
 

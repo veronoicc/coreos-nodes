@@ -11,7 +11,7 @@ The NetBird **client** on the node is not an app, it is baked into the Ignition 
 |---|---|---|
 | `netbird-server.container` | apps-sync | `netbirdio/netbird-server`: management, signal, relay, STUN and the embedded Dex IdP in one container. Publishes only `3478/udp`. |
 | `netbird-dashboard.container`, `dashboard.env` | apps-sync | Web UI, not published. `dashboard.env` is plain (no secrets). |
-| `routes.yml` | apps-sync | Traefik routes (gRPC h2c, WebSocket/relay, API, OAuth2, dashboard) for `netbird.veronoi.cc`, loaded by `apps/traefik`. |
+| `routes.yml` | apps-sync | Traefik routes (gRPC h2c, WebSocket/relay, API, OAuth2, dashboard) for `netbird.veronoi.cc`, loaded by `apps/traefik`. Each router has a `netbird-service-*` twin for `netbird.service.veronoi.cc` (public + mesh, wildcard certificate), the target host of the planned cutover; the old host stays until then. |
 | `netbird-data.volume` | apps-sync | Named volume with the NetBird database. Persistent. |
 | `/var/data/netbird-server/config.yaml` | secrets-sync | The server config with all secrets, from `secrets/ecstasy/netbird-server.yaml.sops` (0600 root). |
 
