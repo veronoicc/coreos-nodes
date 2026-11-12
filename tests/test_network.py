@@ -130,7 +130,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setattr(build, "run_validate", lambda p: None)
 
     def build_with(node):
-        (tmp_path / "nodes" / "ecstasy.yml").write_text(yaml.safe_dump(node))
+        (tmp_path / "nodes" / "ecstasy.yml").write_text(yaml.safe_dump(node) + "apps: []\n")
         build.build_node("ecstasy", tmp_path)
         return tmp_path / "build" / "ecstasy-static.nmconnection"
 

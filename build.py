@@ -70,10 +70,19 @@ def list_nodes(root=ROOT):
     return sorted(p.stem for p in (Path(root) / "nodes").glob("*.yml"))
 
 
+# apps-sync (no YAML parser on the node) reads only this line shape: keep in sync with resolve_list in files/apps-sync.
+APPS_LINE = re.compile(r"apps: \[(([a-z0-9][a-z0-9-]*)(, [a-z0-9][a-z0-9-]*)*)?\]\s*(#.*)?")
+
+
 def load_node(name, root=ROOT):
     path = Path(root) / "nodes" / f"{name}.yml"
     if not path.is_file():
         raise ConfigError(f"unknown node {name!r}: {path} does not exist")
+    lines = [line for line in path.read_text().splitlines() if line.startswith("apps:")]
+    if len(lines) != 1 or not APPS_LINE.fullmatch(lines[0]):
+        raise ConfigError(
+            f"{path}: need exactly one single-line `apps: [a, b]` (or `apps: []`) line, which apps-sync parses on the node; got {lines}"
+        )
     return load_yaml(path)
 
 

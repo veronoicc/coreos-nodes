@@ -251,10 +251,40 @@ def test_validate_rejects_garbage(tmp_path):
 
 def test_node_device_and_listing(tmp_path):
     (tmp_path / "nodes").mkdir()
-    (tmp_path / "nodes" / "a.yml").write_text("device: /dev/sda\n")
-    (tmp_path / "nodes" / "b.yml").write_text("device: /dev/nvme0n1\n")
+    (tmp_path / "nodes" / "a.yml").write_text("device: /dev/sda\napps: []\n")
+    (tmp_path / "nodes" / "b.yml").write_text("device: /dev/nvme0n1\napps: []\n")
     assert build.list_nodes(tmp_path) == ["a", "b"]
     assert build.load_node("b", tmp_path)["device"] == "/dev/nvme0n1"
+
+
+@pytest.mark.parametrize("line", ["apps: [a, b-2]", "apps: []", "apps: [a]  # why"])
+def test_node_apps_line_accepted(tmp_path, line):
+    (tmp_path / "nodes").mkdir()
+    (tmp_path / "nodes" / "n.yml").write_text(f"device: /dev/sda\n{line}\n")
+    build.load_node("n", tmp_path)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "device: /dev/sda\n",  # missing
+        "apps:\n  - a\n",
+        "apps:\n",
+        "apps: a\n",
+        "apps: [a,b]\n",
+        "apps: [A]\n",
+        "apps: ['a']\n",
+        "apps: [a] x\n",
+        "apps: [a]\napps: [b]\n",
+        "apps:   [a]\n",
+    ],
+)
+def test_node_apps_line_must_be_single_line_flow_list(tmp_path, text):
+    # apps-sync parses this line in shell on the node: anything else is rejected at build time
+    (tmp_path / "nodes").mkdir()
+    (tmp_path / "nodes" / "n.yml").write_text(text)
+    with pytest.raises(build.ConfigError, match="apps"):
+        build.load_node("n", tmp_path)
 
 
 def test_installer_config_saves_data_partition():
