@@ -126,7 +126,7 @@ def coke(tmp_path_factory, mesh_port, vm):
 
 
 def mesh_address():
-    """The address apps/authentik publishes Authentik on (and apps/authentik-route routes to)."""
+    """The address apps/authentik publishes Authentik on (and apps/authentik/routes.yml routes to)."""
     publish = re.search(r"(?m)^PublishPort=([\d.]+):9000:9000$", (ROOT / "apps" / "authentik" / "authentik-server.container").read_text())
     return publish.group(1)
 
@@ -383,7 +383,7 @@ def test_ecstasy_apps_are_declarative(vm, tmp_path, real_tools):
     ssh = vm["ssh"]
     sudo = lambda *a, **k: ssh("sudo", *a, **k)  # noqa: E731
     src = make_src(tmp_path, "ecstasy")
-    assert 'APPS_LIST="traefik netbird authentik-route paperless-route"' in sudo("cat", "/etc/apps-sync.env").stdout
+    assert 'APPS_LIST="traefik netbird"' in sudo("cat", "/etc/apps-sync.env").stdout
     pub = sudo("cat", "/var/data/secrets/age.pub").stdout.strip()
 
     # 0. Traefik needs its Cloudflare token (EnvironmentFile) to start: render a dummy one first, so it starts without a retry loop
@@ -400,7 +400,7 @@ def test_ecstasy_apps_are_declarative(vm, tmp_path, real_tools):
     assert sudo("stat", "-c", "%a %U", "/var/data/secrets/traefik.env").stdout.strip() == "600 root"
     targets.write_text(real_targets)  # from here on the real manifest: the unchanged file is neither rewritten nor restarts Traefik
 
-    # 1. apps only (authentik-route, paperless-route held back): files deployed, README not, units gated, Traefik runs, shared network and volumes exist
+    # 1. apps only (no nodes/ in the repo copy, so no remote routes yet): files deployed, README not, units gated, Traefik runs, shared network and volumes exist
     push(vm, src)
     r = ssh(*apps_sync_cmd("traefik netbird"), check=False)
     assert r.returncode == 0, r.stderr
@@ -466,20 +466,29 @@ def test_ecstasy_apps_are_declarative(vm, tmp_path, real_tools):
     avc = sudo("sh", "-c", "ausearch -m avc -ts boot 2>/dev/null | grep -c -E 'traefik|netbird' || true", check=False).stdout.strip()
     print("traefik/netbird AVC denials since boot:", avc)
 
-    # 6. the authentik-route app is added: Traefik picks the new route up by reload (no restart), 502/504 because coke is not there yet
+    # 6. routes follow the app: with the node files in the repo copy, Traefik gets authentik/ and paperless/ route files (apps of coke)
+    # and no quadlets of them; the new routes are picked up by reload (no restart), 502/504 because coke is not there yet
+    shutil.copytree(ROOT / "nodes", src / "nodes")
+    push(vm, src)
     before = unit_props(vm, ("traefik.service",), "ActiveEnterTimestampMonotonic")
     r = ssh(*apps_sync_cmd(), check=False)  # the node's full list
     assert r.returncode == 0, r.stderr
-    ssh("test", "-f", f"{d}/authentik-route/routes.yml")
+    for app in ("authentik", "paperless"):
+        assert ssh("ls", f"{d}/{app}").stdout.split() == ["routes.yml"], app
     wait_for(lambda: code(vm, AUTH_HOST, "/") in {"502", "504"}, "the authentik route after the reload", 60, 2)
     assert unit_props(vm, ("traefik.service",), "ActiveEnterTimestampMonotonic") == before, "Traefik was restarted instead of reloaded"
     assert unit_props(vm, ("traefik.service",), "NRestarts") == {"traefik.service": "NRestarts=0"}
-    # removing the app again removes the route (and its reload)
-    ssh(*apps_sync_cmd("traefik netbird"))
+    # nodes/ gone from the repo copy: no app is listed anywhere, the route-only dirs and their routes disappear (and Traefik reloads)
+    shutil.rmtree(src / "nodes")
+    push(vm, src)
+    ssh(*apps_sync_cmd())
     wait_for(lambda: code(vm, AUTH_HOST, "/") == "404", "the route to disappear", 60, 2)
+    ssh("test", "!", "-e", f"{d}/authentik")
+    shutil.copytree(ROOT / "nodes", src / "nodes")
+    push(vm, src)
     ssh(*apps_sync_cmd())
     wait_for(lambda: code(vm, AUTH_HOST, "/") in {"502", "504"}, "the route to come back", 60, 2)
-    # paperless-route: the main router is mesh-only (404 on the public entrypoint, even with the route loaded), only /share/ is public
+    # paperless: the main router is mesh-only (404 on the public entrypoint, even with the route loaded), only /share/ is public
     wait_for(lambda: code(vm, PAPERLESS_HOST, "/", ip=ECSTASY_MESH) in {"502", "504"}, "the paperless route on the mesh entrypoint", 60, 2)
     assert code(vm, PAPERLESS_HOST, "/") == "404"
     assert code(vm, PAPERLESS_HOST, "/share/smoke/") in {"502", "504"}
