@@ -1,10 +1,10 @@
 # Traefik (shared reverse proxy)
 
 One Traefik per node that serves HTTPS. It owns `80/tcp` and `443/tcp` on the node's public IP, a private listener on the mesh IP, and
-Let's Encrypt (TLS-ALPN challenge for the public exceptions, DNS-01 for `*.service.veronoi.cc`).
+Let's Encrypt (TLS-ALPN challenge for the public exceptions, DNS-01 for `*.internal.veronoi.cc` and `*.service.veronoi.cc`).
 It is app-agnostic: it never names an app. Every app ships its own routes, Traefik loads whatever is deployed on the node.
 Listed in `nodes/<name>.yml` under `apps:` (today: ecstasy). Generic mechanics: root [README](../../README.md) (Apps from git);
-the domain scheme (public / mesh-only / both): root README, Domain scheme.
+the domain scheme (internal / service / exceptions): root README, Domain scheme.
 
 | File | Content |
 |---|---|
@@ -16,10 +16,10 @@ the domain scheme (public / mesh-only / both): root README, Domain scheme.
 
 1. The app ships a file named **`routes.yml`** in its app directory: a Traefik *dynamic* configuration (`http:` routers and
    services, optionally `tcp:`/`tls:`).
-   Routers set `entryPoints` **explicitly** (`[websecure]` public, `[mesh]` private, `[websecure, mesh]` both). Services under
-   `service.veronoi.cc` use `tls: {certResolver: letsencrypt-dns, domains: [{main: "*.service.veronoi.cc"}]}` and a `Host(...)` rule; the
-   exceptions `netbird.veronoi.cc` / `auth.veronoi.cc` use `certResolver: letsencrypt`. Router/service names are prefixed with the app
-   name (names are global across `routes.yml` files).
+   Routers set `entryPoints` **explicitly** (`[mesh]` for `<x>.internal.veronoi.cc`, `[websecure, mesh]` for `<x>.service.veronoi.cc`). Both use
+   `tls: {certResolver: letsencrypt-dns, domains: [{main: "*.<domain>"}]}` (the wildcard of their domain) and a `Host(...)` rule; the
+   exceptions `netbird.veronoi.cc` / `auth.veronoi.cc` use `[websecure]` and `certResolver: letsencrypt`. Router/service names are prefixed
+   with the app name (names are global across `routes.yml` files).
 2. If the backend is a container on this node, the app joins the shared network (`Network=traefik.network`) and the route uses its
    `ContainerName` as host. If the backend is elsewhere (for example Authentik on coke, reached over the NetBird mesh), the route
    uses its address; see [`apps/authentik-route`](../authentik-route/README.md).
@@ -40,10 +40,11 @@ whole configuration on the first file that does not parse. Apps contain other YA
   requires each to be a valid dynamic config named `routes.yml` (top-level keys only `http`/`tcp`/`udp`/`tls`, no `{{`, router and
   service names unique, every router has an existing service). The Authentik blueprint is
   provably *not* one, and a test enforces that `authentik` is never on a node with `traefik`.
-- **Router guard** (same test): every router sets `entryPoints` explicitly (a subset of `websecure`/`mesh`) and has a `Host(...)` rule;
-  a host directly under `service.veronoi.cc` must use `letsencrypt-dns` with exactly the wildcard domain; any other host must be one of
-  the two public exceptions on `[websecure]` with `letsencrypt`. A mesh-only router with a made-up name, a public one with a typo'd
-  resolver, or a router that forgot its entry points fails the test.
+- **Router guard** (same test, `check_router`): every router sets `entryPoints` explicitly (a subset of `websecure`/`mesh`) and has a `Host(...)` rule;
+  a host directly under `internal.veronoi.cc` must be `[mesh]` with `letsencrypt-dns` and the `*.internal.veronoi.cc` wildcard; a host directly
+  under `service.veronoi.cc` must include `websecure` (`[websecure]` or `[websecure, mesh]`) with the `*.service.veronoi.cc` wildcard; deeper
+  subdomains are rejected; any other host must be one of the two public exceptions on `[websecure]` with `letsencrypt`. A private router
+  on the public entrypoint, a public one without `websecure`, a typo'd resolver, or a router that forgot its entry points fails the test.
 - The static configuration is not a file, so it can never be picked up by the provider.
 
 ### Reload
@@ -61,8 +62,8 @@ All flags are in the `Exec=` line of `traefik.container`:
   container) is published only on the mesh IP `100.127.17.6:443` and is the **default entrypoint** (`asdefault=true`): a router without
   `entryPoints` is private, never public.
 - Resolvers: `letsencrypt` (`tlsChallenge`, `/letsencrypt/acme.json`) for `netbird.`/`auth.veronoi.cc`; `letsencrypt-dns`
-  (`dnsChallenge`, provider `cloudflare`, `/letsencrypt/acme-dns.json`) for the wildcard `*.service.veronoi.cc`. The DNS resolver asks
-  `1.1.1.1:53,8.8.8.8:53` for the propagation check, so it never sees the NetBird zone that answers the same names privately.
+  (`dnsChallenge`, provider `cloudflare`, `/letsencrypt/acme-dns.json`) for the wildcards `*.internal.veronoi.cc` and `*.service.veronoi.cc`.
+  The DNS resolver asks `1.1.1.1:53,8.8.8.8:53` for the propagation check, so it always sees the public records.
 - `aliasHeadersStrategy=delete` (NetBird requires Traefik v3.7.13 or newer for it) and timeouts of `0` on `websecure` and `mesh`
   (`readTimeout`, `writeTimeout`, `idleTimeout`) and in `serversTransport.forwardingTimeouts` (`responseHeaderTimeout`, `idleConnTimeout`):
   long-lived gRPC and WebSocket streams must not be cut.
@@ -97,17 +98,13 @@ Commit and push `secrets/ecstasy/traefik.env.sops`; `secrets-sync` renders `/var
 commit the token before the node needs Traefik. The file is a `[Container] EnvironmentFile=` (read by podman): a `[Service]`
 `EnvironmentFile=` would be read by systemd, which SELinux denies for `/var/data` (`var_t`), and the token would silently be empty.
 
-## NetBird zone (your step, not in git)
+## DNS (your step, not in git)
 
-Dashboard -> DNS -> Zones -> add zone `service.veronoi.cc`, distributed to all peers, one **A** record per service (name `<x>`, value
-`100.127.17.6`), for public services too. Details and why: root README, Domain scheme.
-
-## DNS and firewall
-
-An **A** record per **public** host name pointing at the node's public IPv4 (`netbird.veronoi.cc`, `auth.veronoi.cc`, and `<x>.service.veronoi.cc` of
-public services; **no record** for mesh-only services), and **no AAAA**
-unless the node has working public IPv6 with `80/443` open (Let's Encrypt prefers IPv6 and the challenge then fails). Provider firewall:
-`80/tcp` and `443/tcp`. The wildcard certificate needs neither (DNS-01).
+Two wildcard records in Cloudflare (zone `veronoi.cc`, grey cloud, **no AAAA** unless the node has working public IPv6 with `80/443` open:
+Let's Encrypt prefers IPv6 and the TLS-ALPN challenge then fails): `A *.internal` -> `100.127.17.6` (mesh IP) and `A *.service` ->
+`176.65.149.212` (public IP). The exceptions keep their own `A netbird` / `A auth` -> `176.65.149.212`. No NetBird DNS zone is needed any more
+(the former zone `service.veronoi.cc` can be deleted). Some routers and Pi-holes drop `100.x` answers for public names (DNS-rebind
+protection): allow `internal.veronoi.cc` there. Provider firewall: `80/tcp` and `443/tcp`. The wildcard certificates need neither (DNS-01).
 
 ## Backup, reset, upgrade
 
