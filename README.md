@@ -125,8 +125,9 @@ Targets: ecstasy: `netbird.env.sops` -> `/var/data/secrets/netbird.env` (0600 ro
 `netbird-server.yaml.sops` -> `/var/data/netbird-server/config.yaml` (restarts the two NetBird server units, see
 [`apps/netbird/README.md`](apps/netbird/README.md)); coke: `netbird.env.sops` (same) and `authentik.env.sops` ->
 `/var/data/secrets/authentik.env` (restarts the three Authentik units, see [`apps/authentik/README.md`](apps/authentik/README.md)),
-`authentik-paperless.env.sops` -> `/var/data/secrets/authentik-paperless.env` (optional extra worker env, restarts only `authentik-worker.service`) and
-`paperless.env.sops` -> `/var/data/secrets/paperless.env` (restarts the two Paperless units, see [`apps/paperless/README.md`](apps/paperless/README.md)).
+`authentik-paperless.env.sops` -> `/var/data/secrets/authentik-paperless.env` and `authentik-grafana.env.sops` -> `/var/data/secrets/authentik-grafana.env`
+(optional extra worker envs, restart only `authentik-worker.service`), `paperless.env.sops` -> `/var/data/secrets/paperless.env` (restarts the two Paperless units, see
+[`apps/paperless/README.md`](apps/paperless/README.md)) and `monitoring.env.sops` -> `/var/data/secrets/monitoring.env` (restarts TimescaleDB and Grafana, see [`apps/monitoring/README.md`](apps/monitoring/README.md)).
 The repo ships only the manifest lines.
 
 **Files that do not exist yet:** a manifest line whose encrypted file is not in the folder is **skipped with one log line**
@@ -286,6 +287,8 @@ order of steps, backup and security notes: [`apps/netbird/README.md`](apps/netbi
 The NetBird *client* (`netbird.container`, `NB_SETUP_KEY` from `secrets/<node>/netbird.env.sops`) is baked into the Ignition and is not an app.
 Paperless-ngx on coke (`paperless.service.veronoi.cc`, mesh only except public `/share/` links, login only via Authentik) is a service of the [domain scheme](#domain-scheme):
 [`apps/paperless/README.md`](apps/paperless/README.md) (setup order, first superuser, backup, route).
+Grafana and TimescaleDB on coke (`grafana.service.veronoi.cc`, mesh only except public-dashboard paths, login only via Authentik; the database on the mesh address, TCP 5432):
+[`apps/monitoring/README.md`](apps/monitoring/README.md) (topology, secrets, public dashboards and embedding).
 
 **Client fwmark fix (masquerade collision).** NetBird's default fwmark (`0x1bd21`/`0x1bd22`) has bit `0x2000` set, and netavark's
 hostport rule `meta mark & 0x2000 == 0x2000 masquerade` matched it: every connection DNATed to a published container port (Traefik on

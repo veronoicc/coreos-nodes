@@ -1,7 +1,7 @@
 # Authentik (identity provider for NetBird login)
 
 Authentik 2026.8 (server, worker, PostgreSQL; no Redis: upstream's 2026.8.5 compose has none) on **coke**
-(`apps: [authentik, paperless]` in `nodes/coke.yml`, `coke.node.veronoi.cc`, Fedora CoreOS, `/dev/vda`, 8 GB RAM or more). Public name:
+(`apps: [authentik, paperless, monitoring]` in `nodes/coke.yml`, `coke.node.veronoi.cc`, Fedora CoreOS, `/dev/vda`, 8 GB RAM or more). Public name:
 `auth.service.veronoi.cc` (public + mesh, wildcard certificate). Fully declarative: Quadlets, settings and a blueprint from `apps/authentik/` via `apps-sync`, secrets as
 `secrets/coke/authentik.env.sops` via `secrets-sync`. Generic mechanics: root [README](../../README.md).
 
@@ -42,8 +42,10 @@ browser --443--> ecstasy (176.65.149.212): Traefik, TLS for auth.service.veronoi
 | `settings.env` | Non-secret settings (database host/user/name, proxy CIDRs, telemetry off). |
 | `netbird-blueprint.yaml` | Declares the NetBird OIDC provider and application. Mounted into the worker as `/blueprints/custom/netbird.yaml`. |
 | `paperless-blueprint.yaml` | Declares the Paperless OIDC provider, application and its binding to the group `authentik Admins`. Mounted into the worker as `/blueprints/custom/paperless.yaml`. See [`apps/paperless/README.md`](../paperless/README.md). |
+| `grafana-blueprint.yaml` | Declares the Grafana OIDC provider, application and its binding to the group `authentik Admins`. Mounted into the worker as `/blueprints/custom/grafana.yaml`. See [`apps/monitoring/README.md`](../monitoring/README.md). |
 | `/var/data/secrets/authentik.env` | secrets-sync, 0600 root: secret key, database password, NetBird client secret. |
 | `/var/data/secrets/authentik-paperless.env` | secrets-sync, 0600 root: `AUTHENTIK_PAPERLESS_CLIENT_SECRET` for the Paperless blueprint. Only the worker reads it (`[Container] EnvironmentFile=`, read by podman; systemd may not read `/var/data` under SELinux) and is gated on it (`ConditionPathExists`), restarted by secrets-sync when it appears or changes. Created together with `paperless.env.sops`, whose OIDC client config carries the same value. |
+| `/var/data/secrets/authentik-grafana.env` | secrets-sync, 0600 root: `AUTHENTIK_GRAFANA_CLIENT_SECRET` for the Grafana blueprint. Same mechanics as `authentik-paperless.env` (worker only, gated, restarted when it changes). Created together with `monitoring.env.sops`, whose `GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET` carries the same value. |
 
 All three units have `ConditionPathExists=/var/data/secrets/authentik.env`: before the first render they are skipped, afterwards
 `secrets-sync` (re)starts them together when the file changes. A custom templates volume is not created (none used); add a
@@ -136,6 +138,9 @@ the Authentik API. Check: `https://auth.service.veronoi.cc/application/o/netbird
 `https://paperless.service.veronoi.cc/accounts/oidc/authentik/login/callback/`, no logout redirect entry because Paperless sends the browser to the
 end-session endpoint without `post_logout_redirect_uri`), application `paperless`, and a policy binding that lets only the group `authentik Admins`
 use it (everyone else gets "Permission denied"). Check: `.../application/o/paperless/.well-known/openid-configuration`.
+`grafana-blueprint.yaml` likewise: provider `Grafana` (confidential, client id `grafana`, **strict** redirect URI
+`https://grafana.service.veronoi.cc/login/generic_oauth`, openid/email/profile scopes: `profile` carries `preferred_username` and the `groups` claim Grafana's
+role mapping reads), application `grafana`, binding to `authentik Admins`. Check: `.../application/o/grafana/.well-known/openid-configuration`.
 A blueprint is applied in one transaction: if it fails nothing of it is created, the error is in the Blueprints page and the worker log.
 
 ## Backup
