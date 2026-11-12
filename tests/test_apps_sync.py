@@ -741,6 +741,7 @@ def test_route_only_change_reloads_traefik_without_daemon_reload(tnode):
 def test_remote_route_second_sync_changes_nothing(tnode):
     run_t(tnode)
     run_t(tnode)
+    assert (tnode.apps / "db" / "routes.yml").read_text() == ROUTE  # first sync really deployed it
     assert tnode.calls() == []
 
 
@@ -772,6 +773,9 @@ def test_node_without_traefik_gets_no_remote_routes(tnode):
     tnode.put_node("apps: [whoami]")
     run_t(tnode)
     assert not (tnode.apps / "db").exists()
+    tnode.put_node("apps: [traefik]")  # positive control: same repo, with traefik the route lands
+    run_t(tnode)
+    assert (tnode.apps / "db" / "routes.yml").exists()
 
 
 def test_listing_the_app_locally_deploys_everything(tnode):
@@ -779,6 +783,9 @@ def test_listing_the_app_locally_deploys_everything(tnode):
     run_t(tnode)
     assert (tnode.apps / "db" / "db.container").exists() and (tnode.apps / "db" / "routes.yml").exists()
     assert "db.service" in tnode.restarted()
+    tnode.put("whoami/routes.yml", ROUTE)  # node2's whoami is remote: route-only next to the fully deployed db
+    run_t(tnode)
+    assert sorted(p.name for p in (tnode.apps / "whoami").iterdir()) == ["routes.yml"]
 
 
 def test_route_only_app_cannot_be_reset(tnode):
@@ -786,6 +793,7 @@ def test_route_only_app_cannot_be_reset(tnode):
     r = tnode.run("reset", "db", extra_env={"APPS_LIST": None}, check=False)
     assert r.returncode != 0 and "APPS_LIST" in r.stderr
     assert not any(c.startswith("podman") for c in tnode.calls())
+    assert (tnode.apps / "db" / "routes.yml").exists()  # precondition: the route-only dir really exists
 
 
 def test_malformed_remote_node_file_aborts_without_changes(tnode):
