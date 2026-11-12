@@ -36,10 +36,13 @@ class Env:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(text)
 
-    def put_node(self, apps_line):
-        p = self.src / "nodes" / "node1.yml"
+    def put_node(self, apps_line, name="node1"):
+        p = self.src / "nodes" / f"{name}.yml"
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(f"# node1\n\n{apps_line}\n\nusers: []\n")
+        p.write_text(f"# {name}\n\n{apps_line}\n\nusers: []\n")
+
+    def put_node_file(self, name, apps_line):
+        self.put_node(apps_line, name)
 
     def drop_node(self):
         (self.src / "nodes" / "node1.yml").unlink()
@@ -699,3 +702,98 @@ def test_reset_uses_the_repo_list(env):
     assert "podman rm -f --ignore systemd-db" in env.calls()
     r = env.run("reset", "whoami", extra_env={"APPS_LIST": None}, check=False)
     assert r.returncode != 0 and "whoami" in r.stderr
+
+
+# ---- routes follow the app they route to: a Traefik node deploys routes.yml of apps listed on any node
+
+
+@pytest.fixture
+def tnode(env):
+    # node1 runs traefik (nothing else); node2 runs db and whoami. db has a route file.
+    env.put_node("apps: [traefik]")
+    env.put("traefik/traefik.container", WHOAMI)
+    env.put_node_file("node2", "apps: [db, whoami]")
+    env.put("db/routes.yml", ROUTE)
+    return env
+
+
+def run_t(env, **kw):
+    return env.run(extra_env={"APPS_LIST": None}, **kw)
+
+
+def test_remote_app_route_lands_on_traefik_node_without_quadlets(tnode):
+    run_t(tnode)
+    assert (tnode.apps / "db" / "routes.yml").read_text() == ROUTE
+    assert sorted(p.name for p in (tnode.apps / "db").iterdir()) == ["routes.yml"]
+    assert not (tnode.apps / "whoami").exists()  # listed on node2 but has no route file
+    calls = tnode.calls()
+    assert tnode.restarted() == {"traefik.service"}  # nothing of db is started
+    assert calls.count("systemctl reload traefik.service") == 1
+
+
+def test_route_only_change_reloads_traefik_without_daemon_reload(tnode):
+    run_t(tnode)
+    tnode.put("db/routes.yml", ROUTE + "# changed\n")
+    run_t(tnode)
+    assert tnode.calls() == ["systemctl reload traefik.service"]
+
+
+def test_remote_route_second_sync_changes_nothing(tnode):
+    run_t(tnode)
+    run_t(tnode)
+    assert tnode.calls() == []
+
+
+def test_remote_app_dropped_from_all_nodes_removes_route_and_reloads(tnode):
+    run_t(tnode)
+    tnode.put_node_file("node2", "apps: [whoami]")
+    run_t(tnode)
+    assert not (tnode.apps / "db").exists()
+    assert "systemctl reload traefik.service" in tnode.calls()
+    assert not any(c.startswith("systemctl stop db") for c in tnode.calls())  # route-only: no unit to stop
+
+
+def test_route_removed_from_repo_is_removed_from_traefik_node(tnode):
+    run_t(tnode)
+    tnode.drop("db/routes.yml")
+    run_t(tnode)
+    assert not (tnode.apps / "db").exists()
+    assert "systemctl reload traefik.service" in tnode.calls()
+
+
+def test_remote_quadlets_and_other_files_never_deployed(tnode):
+    tnode.put("db/db.env", "x=1\n")
+    tnode.put("db/blueprint.yaml", ROUTE)  # a .yaml that is not a route file
+    run_t(tnode)
+    assert [p.name for p in (tnode.apps / "db").iterdir()] == ["routes.yml"]
+
+
+def test_node_without_traefik_gets_no_remote_routes(tnode):
+    tnode.put_node("apps: [whoami]")
+    run_t(tnode)
+    assert not (tnode.apps / "db").exists()
+
+
+def test_listing_the_app_locally_deploys_everything(tnode):
+    tnode.put_node("apps: [traefik, db]")
+    run_t(tnode)
+    assert (tnode.apps / "db" / "db.container").exists() and (tnode.apps / "db" / "routes.yml").exists()
+    assert "db.service" in tnode.restarted()
+
+
+def test_route_only_app_cannot_be_reset(tnode):
+    run_t(tnode)
+    r = tnode.run("reset", "db", extra_env={"APPS_LIST": None}, check=False)
+    assert r.returncode != 0 and "APPS_LIST" in r.stderr
+    assert not any(c.startswith("podman") for c in tnode.calls())
+
+
+def test_malformed_remote_node_file_aborts_without_changes(tnode):
+    run_t(tnode)
+    before = sorted(p.relative_to(tnode.apps) for p in tnode.apps.rglob("*"))
+    tnode.put_node_file("node2", "apps: db")
+    tnode.put("db/routes.yml", ROUTE + "# changed\n")
+    r = run_t(tnode, check=False)
+    assert r.returncode != 0 and "node2.yml" in r.stderr and tnode.calls() == []
+    assert sorted(p.relative_to(tnode.apps) for p in tnode.apps.rglob("*")) == before
+    assert (tnode.apps / "db" / "routes.yml").read_text() == ROUTE

@@ -22,6 +22,10 @@
 # never deleted). `reset` uses the same resolved list.
 # A deployed or removed *.yml|*.yaml|*.toml file (Traefik route files) triggers `systemctl reload traefik.service` after the
 # restarts: Traefik's directory watcher does not see changes in subdirectories. A failing or missing reload is ignored.
+# Routes follow the app they route to: on a node that lists `traefik`, apps/<app>/routes.{yml,yaml,toml} of every app listed
+#   on ANY node (all nodes/*.yml, same parser, a malformed file aborts the run) is deployed to $APPS_DIR/<app>/ with only the
+#   route files present, never quadlets: a route-only dir creates, starts and resets nothing. It is removed like any removed
+#   file once no node lists the app any more. `reset <app>` of such an app is refused (not in this node's APPS_LIST).
 set -euo pipefail
 
 APPS_ENV_FILE=${APPS_ENV_FILE:-/etc/apps-sync.env}
@@ -94,6 +98,7 @@ setting() { sed -n "s/^$2=//p" "$1" | head -n1; }
 
 # Per-run state.
 declare -a CHANGED=() # "<app>/<file>" copied or updated
+declare -a ROUTE_APPS=() # apps of any node whose route files this Traefik node deploys (see resolve_remote_routes)
 REMOVED=0
 ROUTES=0 # a route file (.yml/.yaml/.toml) was deployed, updated or removed
 
@@ -141,6 +146,33 @@ wanted() {
     return 1
 }
 
+# is_route_file <name>: routes.yml|yaml|toml, the only files of an app other nodes' Traefik deploys.
+is_route_file() {
+    [[ $1 == routes.yml || $1 == routes.yaml || $1 == routes.toml ]]
+}
+
+# remote_route <app> <file>: a route file of an app of another node that this Traefik node must keep.
+remote_route() {
+    local a
+    is_route_file "$2" && [ -f "$SRC/apps/$1/$2" ] || return 1
+    for a in "${ROUTE_APPS[@]}"; do [ "$a" = "$1" ] && return 0; done
+    return 1
+}
+
+# deploy_routes <app>: like deploy, route files only; not recorded in CHANGED (no unit is touched).
+deploy_routes() {
+    local f dest app=$1
+    for f in "$SRC/apps/$app"/*; do
+        [ -f "$f" ] && [ ! -L "$f" ] || continue
+        is_route_file "${f##*/}" || continue
+        dest=$APPS_DIR/$app/${f##*/}
+        if ! cmp -s "$f" "$dest"; then
+            install -D -m 0644 "$f" "$dest"
+            ROUTES=1
+        fi
+    done
+}
+
 # prune: remove managed files whose repo counterpart vanished or whose app is not wanted, stop their units.
 prune() {
     local d f app name unit
@@ -156,6 +188,7 @@ prune() {
                 continue
             fi
             ! wanted "$app" || [ ! -f "$SRC/apps/$app/$name" ] || continue
+            ! remote_route "$app" "$name" || continue
             unit=$(unit_of "$name")
             [ -z "$unit" ] || systemctl stop "$unit" || true
             rm -f "$f"
@@ -191,9 +224,13 @@ reconcile() {
         if [ -d "$SRC/apps/$app" ]; then apps+=("$app"); else echo "apps-sync: listed app '$app' is not in the repo" >&2; fi
     done
     if [ "${#apps[@]}" -gt 0 ]; then deploy "${apps[@]}"; fi
+    # Apps of other nodes: only their route files, never units (no CHANGED entry, so no daemon-reload or restart).
+    for app in "${ROUTE_APPS[@]}"; do
+        if [ -d "$SRC/apps/$app" ] && ! wanted "$app"; then deploy_routes "$app"; fi
+    done
     prune
-    [ "${#CHANGED[@]}" -gt 0 ] || [ "$REMOVED" -eq 1 ] || return 0
-    systemctl daemon-reload
+    [ "${#CHANGED[@]}" -gt 0 ] || [ "$REMOVED" -eq 1 ] || [ "$ROUTES" -eq 1 ] || return 0
+    if [ "${#CHANGED[@]}" -gt 0 ] || [ "$REMOVED" -eq 1 ]; then systemctl daemon-reload; fi
     if [ "${#CHANGED[@]}" -gt 0 ]; then
         while read -r unit; do
             systemctl restart "$unit"
@@ -273,25 +310,42 @@ parse_reset() {
     reset "$app" "$include"
 }
 
+# apps_of <file>: the apps of a nodes/<node>.yml `apps:` line (space separated), dies on a missing/repeated/malformed line.
+apps_of() {
+    local f=$1 line list='' count=0
+    local re='^apps: \[(([a-z0-9][a-z0-9-]*)(, [a-z0-9][a-z0-9-]*)*)?\][[:space:]]*(#.*)?$'
+    while IFS= read -r line || [ -n "$line" ]; do
+        [[ $line == apps:* ]] || continue
+        count=$((count + 1))
+        [[ $line =~ $re ]] || die "${f#"$SRC"/}: malformed apps line '$line' (want: apps: [a, b] or apps: []), nothing changed"
+        list=${BASH_REMATCH[1]}
+    done < "$f"
+    [ "$count" -eq 1 ] || die "${f#"$SRC"/}: need exactly one 'apps: [a, b]' line, found $count, nothing changed"
+    echo "${list//,/ }"
+}
+
 # resolve_list: APPS_LIST = what this node runs, before anything is touched (see precedence in the header).
 resolve_list() {
     [ "$APPS_LIST_FIXED" -eq 0 ] || return 0
-    local f n line list='' count=0
-    local re='^apps: \[(([a-z0-9][a-z0-9-]*)(, [a-z0-9][a-z0-9-]*)*)?\][[:space:]]*(#.*)?$'
+    local f n
     [ -f "$APPS_HOSTNAME_FILE" ] || die "$APPS_HOSTNAME_FILE not found"
     n=$(head -n1 "$APPS_HOSTNAME_FILE")
     n=${n%%.*}
     [[ $n =~ ^[A-Za-z0-9_-]+$ ]] || die "cannot derive a node name from $APPS_HOSTNAME_FILE"
     f=$SRC/nodes/$n.yml
     [ -f "$f" ] || return 0 # keep the baked list
-    while IFS= read -r line || [ -n "$line" ]; do
-        [[ $line == apps:* ]] || continue
-        count=$((count + 1))
-        [[ $line =~ $re ]] || die "nodes/$n.yml: malformed apps line '$line' (want: apps: [a, b] or apps: []), nothing changed"
-        list=${BASH_REMATCH[1]}
-    done < "$f"
-    [ "$count" -eq 1 ] || die "nodes/$n.yml: need exactly one 'apps: [a, b]' line, found $count, nothing changed"
-    APPS_LIST=${list//,/ }
+    APPS_LIST=$(apps_of "$f")
+}
+
+# resolve_remote_routes: on a Traefik node, ROUTE_APPS = apps listed on any node (all nodes/*.yml), whose routes.* it needs.
+resolve_remote_routes() {
+    local f a list
+    [[ " $APPS_LIST " == *" traefik "* ]] || return 0
+    for f in "$SRC"/nodes/*.yml; do
+        [ -f "$f" ] || continue
+        list=$(apps_of "$f") # separate statement: a die inside `for ... in $(...)` would not abort
+        for a in $list; do ROUTE_APPS+=("$a"); done
+    done
 }
 
 main() {
@@ -301,6 +355,7 @@ main() {
     trap 'rm -rf "$work"' EXIT
     fetch "$work"
     resolve_list
+    resolve_remote_routes
     case ${1:-sync} in
         sync) reconcile ;;
         reset) shift; parse_reset "$@" ;;
