@@ -1,0 +1,3 @@
+[Network]
+# Private network of the monitoring stack: Grafana reaches TimescaleDB as `timescaledb:5432` here. Nothing is published except
+# TimescaleDB and Grafana on the mesh address (see the .container files).

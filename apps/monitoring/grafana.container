@@ -1,0 +1,32 @@
+[Unit]
+Description=Grafana (login via Authentik, TimescaleDB datasource)
+Wants=network-online.target netbird.service
+# netbird.service is the baked NetBird client: the mesh interface (wt0) has to exist before the port can be bound to the
+# mesh address. It is only ordered, not required; if the bind still fails the unit is retried (below).
+After=network-online.target netbird.service
+RequiresMountsFor=/var/data
+# /var/data/secrets/monitoring.env is rendered by secrets-sync (secrets/coke/monitoring.env.sops); until then the unit is skipped
+# instead of crash-looping, and secrets-sync restarts both monitoring units when it appears or changes.
+ConditionPathExists=/var/data/secrets/monitoring.env
+# Retry forever: after a reboot the mesh address appears some seconds after the client started.
+StartLimitIntervalSec=0
+
+[Container]
+Image=docker.io/grafana/grafana:13.3.1
+ContainerName=grafana
+Network=monitoring.network
+# Reachable ONLY on the mesh address of this node, never on 0.0.0.0. The same address is in apps/monitoring/routes.yml;
+# edit both if the peer is re-registered.
+PublishPort=100.127.197.215:3000:3000
+EnvironmentFile=/etc/containers/systemd/apps/monitoring/settings.env
+# GF_SECURITY_ADMIN_PASSWORD, GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET and GRAFANA_DB_PASSWORD (for $__env{} in the datasource).
+EnvironmentFile=/var/data/secrets/monitoring.env
+Volume=grafana-data.volume:/var/lib/grafana
+Volume=/etc/containers/systemd/apps/monitoring/datasource-timescaledb.yaml:/etc/grafana/provisioning/datasources/timescaledb.yaml:ro,z
+
+[Service]
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

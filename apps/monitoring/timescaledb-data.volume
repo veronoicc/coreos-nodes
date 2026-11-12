@@ -1,0 +1,5 @@
+# apps-sync: keep
+# TimescaleDB /var/lib/postgresql/data: every database, including the `grafana` role created by the init script.
+# Persistent: `apps-sync reset monitoring` keeps it, only `apps-sync reset --include-persistent monitoring` removes it.
+[Volume]
+VolumeName=timescaledb-data

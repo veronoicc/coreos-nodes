@@ -1,0 +1,5 @@
+# apps-sync: keep
+# Grafana /var/lib/grafana: SQLite database (dashboards, users, public dashboard tokens), plugins.
+# Persistent: `apps-sync reset monitoring` keeps it, only `apps-sync reset --include-persistent monitoring` removes it.
+[Volume]
+VolumeName=grafana-data

@@ -16,7 +16,7 @@ network:
 
 # Apps from apps/ this node runs (everything else is removed; empty or missing = no apps).
 # Needs >= 8 GB RAM for Authentik. No inbound ports: reached over the NetBird mesh via ecstasy's Traefik.
-apps: [authentik, paperless]
+apps: [authentik, paperless, monitoring]
 
 # Extra users on top of config.yml (same shape):
 # users:

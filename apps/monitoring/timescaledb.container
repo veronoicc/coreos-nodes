@@ -1,0 +1,35 @@
+[Unit]
+Description=TimescaleDB (PostgreSQL 17) for monitoring
+Wants=network-online.target netbird.service
+# netbird.service is the baked NetBird client: the mesh interface (wt0) has to exist before the port can be bound to the
+# mesh address. It is only ordered, not required; if the bind still fails the unit is retried (below).
+After=network-online.target netbird.service
+RequiresMountsFor=/var/data
+# /var/data/secrets/monitoring.env is rendered by secrets-sync (secrets/coke/monitoring.env.sops); until then the unit is skipped
+# instead of crash-looping, and secrets-sync restarts both monitoring units when it appears or changes.
+ConditionPathExists=/var/data/secrets/monitoring.env
+# Retry forever: after a reboot the mesh address appears some seconds after the client started.
+StartLimitIntervalSec=0
+
+[Container]
+Image=docker.io/timescale/timescaledb:2.32.0-pg17
+ContainerName=timescaledb
+Network=monitoring.network
+# Reachable ONLY on the mesh address of this node (stable per NetBird peer), never on 0.0.0.0, so a public interface can never
+# serve it. Mesh devices connect with psql -h 100.127.197.215 -U admin (NetBird policy for TCP 5432, see README.md); Traefik does not route it.
+PublishPort=100.127.197.215:5432:5432
+# POSTGRES_PASSWORD and GRAFANA_DB_PASSWORD (read by the init script) come from the rendered env file. Read by podman, not
+# systemd: SELinux denies systemd (init_t) reading /var/data (var_t).
+EnvironmentFile=/var/data/secrets/monitoring.env
+Environment=POSTGRES_USER=admin
+Environment=POSTGRES_DB=monitoring
+Volume=timescaledb-data.volume:/var/lib/postgresql/data
+# Creates the read-only role `grafana`. The image runs it only when the data directory is empty (first start), see README.md.
+Volume=/etc/containers/systemd/apps/monitoring/init-grafana-role.sh:/docker-entrypoint-initdb.d/10-grafana-role.sh:ro,z
+
+[Service]
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

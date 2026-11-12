@@ -1,0 +1,20 @@
+# Grafana datasource provisioning (mounted read-only as /etc/grafana/provisioning/datasources/timescaledb.yaml).
+# `postgres` is the documented alias of the grafana-postgresql-datasource plugin. The read-only role `grafana` is created by
+# init-grafana-role.sh; its password reaches Grafana's environment from /var/data/secrets/monitoring.env.
+apiVersion: 1
+datasources:
+  - name: TimescaleDB
+    uid: timescaledb
+    type: postgres
+    access: proxy
+    url: timescaledb:5432
+    user: grafana
+    isDefault: true
+    editable: false
+    secureJsonData:
+      password: $__env{GRAFANA_DB_PASSWORD}
+    jsonData:
+      database: monitoring
+      sslmode: disable
+      postgresVersion: 1700
+      timescaledb: true
