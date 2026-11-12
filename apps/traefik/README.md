@@ -1,10 +1,10 @@
 # Traefik (shared reverse proxy)
 
 One Traefik per node that serves HTTPS. It owns `80/tcp` and `443/tcp` on the node's public IP, a private listener on the mesh IP, and
-Let's Encrypt (TLS-ALPN challenge for the public exceptions, DNS-01 for `*.internal.veronoi.cc` and `*.service.veronoi.cc`).
+Let's Encrypt (TLS-ALPN challenge for the public exceptions, DNS-01 for `*.service.veronoi.cc`).
 It is app-agnostic: it never names an app. Every app ships its own routes, Traefik loads whatever is deployed on the node.
 Listed in `nodes/<name>.yml` under `apps:` (today: ecstasy). Generic mechanics: root [README](../../README.md) (Apps from git);
-the domain scheme (internal / service / exceptions): root README, Domain scheme.
+the domain scheme (split DNS, router shapes, exceptions): root README, Domain scheme.
 
 | File | Content |
 |---|---|
@@ -16,8 +16,8 @@ the domain scheme (internal / service / exceptions): root README, Domain scheme.
 
 1. The app ships a file named **`routes.yml`** in its app directory: a Traefik *dynamic* configuration (`http:` routers and
    services, optionally `tcp:`/`tls:`).
-   Routers set `entryPoints` **explicitly** (`[mesh]` for `<x>.internal.veronoi.cc`, `[websecure, mesh]` for `<x>.service.veronoi.cc`). Both use
-   `tls: {certResolver: letsencrypt-dns, domains: [{main: "*.<domain>"}]}` (the wildcard of their domain) and a `Host(...)` rule; the
+   Routers set `entryPoints` **explicitly** (`[mesh]` for a mesh-only `<x>.service.veronoi.cc`, `[websecure, mesh]` for a public one, `[websecure]` only path-limited). All use
+   `tls: {certResolver: letsencrypt-dns, domains: [{main: "*.service.veronoi.cc"}]}` and a `Host(...)` rule; the
    exceptions `netbird.veronoi.cc` / `auth.veronoi.cc` use `[websecure]` and `certResolver: letsencrypt`. Router/service names are prefixed
    with the app name (names are global across `routes.yml` files).
 2. If the backend is a container on this node, the app joins the shared network (`Network=traefik.network`) and the route uses its
@@ -41,10 +41,10 @@ whole configuration on the first file that does not parse. Apps contain other YA
   service names unique, every router has an existing service). The Authentik blueprint is
   provably *not* one, and a test enforces that `authentik` is never on a node with `traefik`.
 - **Router guard** (same test, `check_router`): every router sets `entryPoints` explicitly (a subset of `websecure`/`mesh`) and has a `Host(...)` rule;
-  a host directly under `internal.veronoi.cc` must be `[mesh]` with `letsencrypt-dns` and the `*.internal.veronoi.cc` wildcard; a host directly
-  under `service.veronoi.cc` must include `websecure` (`[websecure]` or `[websecure, mesh]`) with the `*.service.veronoi.cc` wildcard; deeper
-  subdomains are rejected; any other host must be one of the two public exceptions on `[websecure]` with `letsencrypt`. A private router
-  on the public entrypoint, a public one without `websecure`, a typo'd resolver, or a router that forgot its entry points fails the test.
+  a host directly under `service.veronoi.cc` must be `[mesh]`, `[websecure, mesh]`, or `[websecure]` with a `PathPrefix(`/`Path(` in the rule,
+  with the `*.service.veronoi.cc` wildcard and `letsencrypt-dns`; every service host also needs a mesh router without path restriction; deeper
+  subdomains are rejected; any other host must be one of the two public exceptions on `[websecure]` with `letsencrypt`. A public router
+  without path limit and mesh, a typo'd resolver, or a router that forgot its entry points fails the test.
 - The static configuration is not a file, so it can never be picked up by the provider.
 
 ### Reload
@@ -62,7 +62,7 @@ All flags are in the `Exec=` line of `traefik.container`:
   container) is published only on the mesh IP `100.127.17.6:443` and is the **default entrypoint** (`asdefault=true`): a router without
   `entryPoints` is private, never public.
 - Resolvers: `letsencrypt` (`tlsChallenge`, `/letsencrypt/acme.json`) for `netbird.`/`auth.veronoi.cc`; `letsencrypt-dns`
-  (`dnsChallenge`, provider `cloudflare`, `/letsencrypt/acme-dns.json`) for the wildcards `*.internal.veronoi.cc` and `*.service.veronoi.cc`.
+  (`dnsChallenge`, provider `cloudflare`, `/letsencrypt/acme-dns.json`) for the wildcard `*.service.veronoi.cc`.
   The DNS resolver asks `1.1.1.1:53,8.8.8.8:53` for the propagation check, so it always sees the public records.
 - `aliasHeadersStrategy=delete` (NetBird requires Traefik v3.7.13 or newer for it) and timeouts of `0` on `websecure` and `mesh`
   (`readTimeout`, `writeTimeout`, `idleTimeout`) and in `serversTransport.forwardingTimeouts` (`responseHeaderTimeout`, `idleConnTimeout`):
@@ -100,11 +100,11 @@ commit the token before the node needs Traefik. The file is a `[Container] Envir
 
 ## DNS (your step, not in git)
 
-Two wildcard records in Cloudflare (zone `veronoi.cc`, grey cloud, **no AAAA** unless the node has working public IPv6 with `80/443` open:
-Let's Encrypt prefers IPv6 and the TLS-ALPN challenge then fails): `A *.internal` -> `100.127.17.6` (mesh IP) and `A *.service` ->
-`176.65.149.212` (public IP). The exceptions keep their own `A netbird` / `A auth` -> `176.65.149.212`. No NetBird DNS zone is needed any more
-(the former zone `service.veronoi.cc` can be deleted). Some routers and Pi-holes drop `100.x` answers for public names (DNS-rebind
-protection): allow `internal.veronoi.cc` there. Provider firewall: `80/tcp` and `443/tcp`. The wildcard certificates need neither (DNS-01).
+Cloudflare wildcard (zone `veronoi.cc`, grey cloud, **no AAAA** unless the node has working public IPv6 with `80/443` open:
+Let's Encrypt prefers IPv6 and the TLS-ALPN challenge then fails): `A *.service` -> `176.65.149.212` (public IP). The exceptions keep their
+own `A netbird` / `A auth` -> `176.65.149.212`. Mesh peers get the mesh IP from the NetBird custom zone `service.veronoi.cc` (`A *` ->
+`100.127.17.6`), see root README, Domain scheme. The former `A *.internal` record is obsolete: delete it. Provider firewall: `80/tcp` and
+`443/tcp`. The wildcard certificate needs neither (DNS-01).
 
 ## Backup, reset, upgrade
 

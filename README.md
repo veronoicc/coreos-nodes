@@ -267,7 +267,7 @@ Traefik over the NetBird mesh), shared Traefik: all declarative, nothing app-spe
 order of steps, backup and security notes: [`apps/netbird/README.md`](apps/netbird/README.md),
 [`apps/authentik/README.md`](apps/authentik/README.md), [`apps/traefik/README.md`](apps/traefik/README.md).
 The NetBird *client* (`netbird.container`, `NB_SETUP_KEY` from `secrets/<node>/netbird.env.sops`) is baked into the Ignition and is not an app.
-Paperless-ngx on coke (`paperless.service.veronoi.cc`, public + mesh, `/admin` blocked publicly, login only via Authentik) is a service of the [domain scheme](#domain-scheme):
+Paperless-ngx on coke (`paperless.service.veronoi.cc`, mesh only except public `/share/` links, login only via Authentik) is a service of the [domain scheme](#domain-scheme):
 [`apps/paperless/README.md`](apps/paperless/README.md) (setup order, first superuser, backup) and [`apps/paperless-route`](apps/paperless-route/README.md) (ecstasy's route).
 
 **Client fwmark fix (masquerade collision).** NetBird's default fwmark (`0x1bd21`/`0x1bd22`) has bit `0x2000` set, and netavark's
@@ -286,39 +286,47 @@ on ecstasy shows the real client IP in Traefik's log, not `172.30.0.1`.
 
 ## Domain scheme
 
-Two domains, chosen by who may reach the service. Which Traefik entrypoint serves a name and which DNS record exists is all there is, no extra component.
+One domain for services, `<x>.service.veronoi.cc`, with **split DNS**: the same name resolves to a different Traefik entrypoint depending on
+who asks. No extra component, only DNS records and Traefik `entryPoints`.
 
-| | `<x>.internal.veronoi.cc` | `<x>.service.veronoi.cc` | exceptions |
+| Who asks | Resolves `*.service.veronoi.cc` to | Traefik entrypoint | Sees |
 |---|---|---|---|
-| reachable from | mesh only | public internet and mesh | public |
-| Traefik `entryPoints` | `[mesh]` | `[websecure, mesh]` (or `[websecure]`) | `[websecure]` |
-| certificate | wildcard `*.internal.veronoi.cc`, `letsencrypt-dns` | wildcard `*.service.veronoi.cc`, `letsencrypt-dns` | per name, `letsencrypt` (TLS-ALPN) |
-| DNS (Cloudflare, one record each) | `A *.internal` -> `100.127.17.6` | `A *.service` -> `176.65.149.212` (grey cloud, no AAAA) | `A netbird`, `A auth` -> `176.65.149.212` (unchanged) |
-| names | any single label | any single label | `netbird.veronoi.cc`, `auth.veronoi.cc` until they move |
+| internet, and any device without NetBird DNS (the nodes themselves, peers with DNS management disabled) | `176.65.149.212` (Cloudflare wildcard) | `websecure` | only the public part of a service |
+| NetBird mesh peer with NetBird DNS | `100.127.17.6` (NetBird custom zone wildcard) | `mesh` | the full service |
 
-**The two Cloudflare records you create** (zone `veronoi.cc`, DNS only / grey cloud, no AAAA):
+**DNS records** (both wildcards, so a new service needs no DNS step):
 
-| Type | Name | Content |
+| Where | Record | Value |
 |---|---|---|
-| A | `*.internal` | `100.127.17.6` |
-| A | `*.service` | `176.65.149.212` |
+| Cloudflare (zone `veronoi.cc`, grey cloud, no AAAA) | `A *.service` | `176.65.149.212` |
+| Cloudflare | `A netbird`, `A auth` | `176.65.149.212` (exceptions, unchanged) |
+| NetBird dashboard, DNS -> Zones: custom zone `service.veronoi.cc` | `A *` | `100.127.17.6` |
+
+The NetBird zone only overrides names inside `service.veronoi.cc`; every other name keeps its public answer. The former
+`*.internal.veronoi.cc` zone is dropped: **delete the Cloudflare record `A *.internal`** (it no longer maps to any router).
+
+**Three router shapes** for a service host (certificate always the wildcard `*.service.veronoi.cc`, `letsencrypt-dns`):
+
+| Shape | `entryPoints` | Meaning |
+|---|---|---|
+| mesh only | `[mesh]` | the internet gets a 404 from Traefik |
+| fully public | `[websecure, mesh]` | everyone gets everything |
+| public path-limited | `[websecure]` and a rule with `PathPrefix(` or `Path(` | the internet gets only those paths |
+
+Every service host additionally needs one router whose `entryPoints` include `mesh` and whose rule has no path restriction, because mesh
+peers resolve the name to the mesh entrypoint and must get the full service (a path-limited public router is a second router next to it).
+Example: Paperless, `paperless` on `[mesh]` plus `paperless-share` on `[websecure]` for `/share/` ([`apps/paperless-route`](apps/paperless-route/README.md)).
 
 - **Entrypoints** (ecstasy, `apps/traefik`): `websecure` (and the `web` redirect) listens only on the public IP `176.65.149.212`; `mesh`
-  listens only on the mesh IP `100.127.17.6:443`. `*.internal` names are never on `websecure`, so even someone who points the name at the
-  public IP by hand is refused. `*.service` names are public by design; a path that must stay private is blocked on `websecure` only
-  (Paperless `/admin`, see [`apps/paperless-route`](apps/paperless-route/README.md)).
+  listens only on the mesh IP `100.127.17.6:443`.
 - **Private by default:** `mesh` is Traefik's default entrypoint (`asdefault`), so a router without `entryPoints` is private, never public.
-  A test (`tests/test_apps.py`, `check_router`) fails on any router without an explicit `entryPoints` list, on `*.internal` outside `[mesh]`,
-  on `*.service` without `websecure`, on deeper subdomains (the wildcard covers one label) and on any other host that is not an exception.
-- **Name resolution:** both zones are plain public Cloudflare wildcards, no NetBird DNS zone. `*.internal` answers a private `100.x` address
-  from public DNS: some routers and Pi-holes drop such answers as DNS-rebind protection, so a client behind one cannot resolve internal
-  names until the domain is allowed (FritzBox: Home Network -> Network -> Network Settings -> DNS rebind protection, add
-  `internal.veronoi.cc`; dnsmasq/Pi-hole: `rebind-domain-ok=/internal.veronoi.cc/`). The `*.internal` address is only reachable with the
-  NetBird client running. The NetBird client on the nodes runs in a container and does not configure systemd-resolved, which is irrelevant
-  for public records.
-- **The NetBird DNS zone `service.veronoi.cc` from before is no longer needed.** Delete it in the dashboard (DNS -> Zones) once the `*.service`
-  record exists; otherwise it shadows the public record for mesh peers (it still resolves to the mesh IP, which keeps working).
-- **Certificate:** one wildcard per domain from Let's Encrypt via DNS-01 (Cloudflare), resolver `letsencrypt-dns`. Only the wildcards show up in
+  A test (`tests/test_apps.py`, `check_router`, `check_mesh_coverage`) fails on any router without an explicit `entryPoints` list, on `[websecure]`
+  without a path restriction, on a service host without a full mesh router, on deeper subdomains (the wildcard covers one label) and on any
+  other host that is not an exception.
+- **Name resolution:** a mesh peer gets the mesh IP only if it uses NetBird DNS. The NetBird client on the nodes runs in a container and does not
+  configure systemd-resolved, so the nodes (and peers with DNS management disabled) get the public answer and reach only the public part.
+  The mesh IP is only reachable with the NetBird client running.
+- **Certificate:** one wildcard from Let's Encrypt via DNS-01 (Cloudflare), resolver `letsencrypt-dns`. Only the wildcard shows up in
   Certificate Transparency logs, never an individual service name. The Cloudflare token is sensitive: scope it to Zone `veronoi.cc`,
   permission Zone:DNS:Edit only (steps: [`apps/traefik/README.md`](apps/traefik/README.md)).
 - **Exceptions** keep their names and the TLS-ALPN resolver `letsencrypt`: `netbird.veronoi.cc` and `auth.veronoi.cc` (public, `[websecure]`, unchanged for now).
@@ -326,9 +334,10 @@ Two domains, chosen by who may reach the service. Which Traefik entrypoint serve
 - **Availability:** Traefik's mesh listener needs `wt0`, so the unit is ordered after `netbird.service` and retried (like `authentik-server`);
   otherwise a reboot could leave Traefik down, public routes included.
 
-**Add a service:** in the app's `routes.yml` add a router with `rule: Host(`<x>.internal.veronoi.cc`)`, `entryPoints: [mesh]`, `tls: {certResolver:
-letsencrypt-dns, domains: [{main: "*.internal.veronoi.cc"}]}` for mesh only; or `Host(`<x>.service.veronoi.cc`)`, `entryPoints: [websecure, mesh]` and the
-`*.service.veronoi.cc` wildcard for public. No DNS step: the wildcard records cover it. A test rejects other hosts, resolvers and missing `entryPoints`.
+**Add a service:** in the app's `routes.yml` add a router with `rule: Host(`<x>.service.veronoi.cc`)`, `entryPoints: [mesh]` (or `[websecure, mesh]`
+for fully public), `tls: {certResolver: letsencrypt-dns, domains: [{main: "*.service.veronoi.cc"}]}`. To expose only some paths publicly, keep the
+`[mesh]` router and add a second one with `&& PathPrefix(`/p/`)` on `[websecure]`. No DNS step: the wildcards cover it. A test rejects other hosts,
+resolvers, missing `entryPoints` and the shapes above that do not hold.
 
 ## Change users (reinstall, keep data)
 
