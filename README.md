@@ -344,7 +344,7 @@ Example: Paperless, `paperless` on `[mesh]` plus `paperless-share` on `[websecur
 no change to the Traefik node's `apps:`.
 
 - **Entrypoints** (ecstasy, `apps/traefik`): `websecure` (and the `web` redirect) listens only on the public IP `176.65.149.212`; `mesh`
-  listens only on the mesh IP `100.127.17.6:443`.
+  listens only on the mesh IP `100.127.17.6:443`, and `meshweb` (`100.127.17.6:80`) only redirects `http://` to `https://` there.
 - **Private by default:** `mesh` is Traefik's default entrypoint (`asdefault`), so a router without `entryPoints` is private, never public.
   A test (`tests/test_apps.py`, `check_router`, `check_mesh_coverage`) fails on any router without an explicit `entryPoints` list, on `[websecure]`
   without a path restriction, on a service host without a full mesh router, on deeper subdomains (the wildcard covers one label) and on any

@@ -454,8 +454,11 @@ def test_ecstasy_apps_are_declarative(vm, tmp_path, real_tools):
     # the mesh entrypoint serves netbird too; neither listener exists on the other address
     assert code(vm, NB_HOST, "/", ip=ECSTASY_MESH) == "200"
     assert code(vm, NB_HOST, "/api/users", ip=ECSTASY_MESH) in {"401", "403"}
-    for url in (f"http://{ECSTASY_MESH}/", f"https://{PUBLIC_IP}:8443/", "http://127.0.0.1/"):
+    for url in (f"https://{PUBLIC_IP}:8443/", "http://127.0.0.1/"):
         assert ssh("curl", "-sk", "-o", "/dev/null", "--max-time", "5", url, check=False).returncode in {7, 28}, url
+    # http:// on the mesh IP is redirected to https on 443 (meshweb entrypoint), never served
+    mesh_redirect = ssh("curl", "-s", "-o", "/dev/null", "-w", "%{http_code} %{redirect_url}", "-H", f"Host: {NB_HOST}", f"http://{ECSTASY_MESH}/").stdout
+    assert mesh_redirect.split()[0] in {"301", "308"} and mesh_redirect.split()[1] == f"https://{NB_HOST}/", mesh_redirect
 
     # 5. named volumes hold the state; Traefik handled acme-dns.json itself (no root mkdir/chmod anywhere)
     mount = sudo("podman", "volume", "inspect", "-f", "{{.Mountpoint}}", "traefik-letsencrypt").stdout.strip()

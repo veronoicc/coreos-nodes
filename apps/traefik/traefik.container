@@ -14,11 +14,12 @@ StartLimitIntervalSec=0
 Image=docker.io/library/traefik:v3.7.18
 ContainerName=traefik
 Network=traefik.network
-# Public entrypoints (web, websecure) only on the public IP, the private one (mesh) only on the mesh IP of this node (stable per
-# NetBird peer): no listener is ever on 0.0.0.0, so a private service cannot be served from the public interface.
+# Public entrypoints (web, websecure) only on the public IP, the private ones (mesh, meshweb) only on the mesh IP of this node
+# (stable per NetBird peer): no listener is ever on 0.0.0.0, so a private service cannot be served from the public interface.
 PublishPort=176.65.149.212:80:80
 PublishPort=176.65.149.212:443:443
 PublishPort=100.127.17.6:443:8443
+PublishPort=100.127.17.6:80:8080
 # The Cloudflare token for the DNS-01 resolver (CF_DNS_API_TOKEN, secrets/ecstasy/traefik.env.sops, see README.md). Read by
 # podman, not systemd: SELinux denies systemd (init_t) reading /var/data (var_t). Until secrets-sync rendered it the start
 # fails and is retried (RestartSec, StartLimitIntervalSec).
@@ -48,6 +49,9 @@ Exec=--log.level=INFO --accesslog=true \
   --entrypoints.mesh.transport.respondingtimeouts.readtimeout=0 \
   --entrypoints.mesh.transport.respondingtimeouts.writetimeout=0 \
   --entrypoints.mesh.transport.respondingtimeouts.idletimeout=0 \
+  --entrypoints.meshweb.address=:8080 \
+  --entrypoints.meshweb.http.redirections.entrypoint.to=:443 \
+  --entrypoints.meshweb.http.redirections.entrypoint.scheme=https \
   --serverstransport.forwardingtimeouts.responseheadertimeout=0s \
   --serverstransport.forwardingtimeouts.idleconntimeout=0s \
   --certificatesresolvers.letsencrypt-dns.acme.storage=/letsencrypt/acme-dns.json \

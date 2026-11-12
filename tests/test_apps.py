@@ -197,7 +197,7 @@ def test_traefik_static_config():
     t = parse_quadlet(APPS / "traefik" / "traefik.container")
     c = t["Container"]
     # public listeners only on the public IP, the mesh listener only on the mesh IP (never 0.0.0.0)
-    assert set(c["PublishPort"]) == {f"{PUBLIC_IP}:80:80", f"{PUBLIC_IP}:443:443", f"{MESH_IP}:443:8443"}
+    assert set(c["PublishPort"]) == {f"{PUBLIC_IP}:80:80", f"{PUBLIC_IP}:443:443", f"{MESH_IP}:443:8443", f"{MESH_IP}:80:8080"}
     assert c["Network"] == ["traefik.network"]
     assert "ConditionPathExists" not in t["Unit"]  # runs on every node that serves HTTPS, not gated on a secret
     # the mesh address only exists once the NetBird client is up: ordered after it, retried forever (like authentik-server)
@@ -224,6 +224,12 @@ def test_traefik_static_config():
     assert f["entrypoints.web.address"] == ":80" and f["entrypoints.websecure.address"] == ":443"
     # the mesh entrypoint is the default: a router that forgets entryPoints is private, never public
     assert f["entrypoints.mesh.address"] == ":8443" and f["entrypoints.mesh.asdefault"] == "true"
+    # http:// from a mesh peer (NetBird zone -> mesh IP) lands on meshweb and is redirected to https on port 443. The target is
+    # the port, not the `mesh` entrypoint: that one listens on 8443 inside the container and would leak :8443 into Location.
+    assert f["entrypoints.meshweb.address"] == ":8080"
+    assert f["entrypoints.meshweb.http.redirections.entrypoint.to"] == ":443"
+    assert f["entrypoints.meshweb.http.redirections.entrypoint.scheme"] == "https"
+    assert "entrypoints.meshweb.asdefault" not in f
     assert "entrypoints.websecure.asdefault" not in f
     for ep in ("websecure", "mesh"):
         assert f[f"entrypoints.{ep}.http.aliasheadersstrategy"] == "delete"
