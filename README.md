@@ -156,7 +156,7 @@ If no listed file exists at all, `secrets-sync` logs one line and exits 0.
    ```
 5. Create the encrypted dotenv (tested with the pinned sops: the path only has to match `.sops.yaml`, `--filename-override` supplies it for stdin):
    ```
-   printf 'NB_SETUP_KEY=<key>\nNB_MANAGEMENT_URL=https://netbird.veronoi.cc\n' |
+   printf 'NB_SETUP_KEY=<key>\nNB_MANAGEMENT_URL=https://netbird.service.veronoi.cc:443\n' |
      sops --encrypt --input-type dotenv --output-type dotenv \
        --filename-override secrets/ecstasy/netbird.env.sops /dev/stdin > secrets/ecstasy/netbird.env.sops
    ```
