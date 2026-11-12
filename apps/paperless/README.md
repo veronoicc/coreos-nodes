@@ -1,14 +1,14 @@
-# Paperless-ngx (document archive, mesh-only, login via Authentik)
+# Paperless-ngx (document archive, public + mesh, login via Authentik)
 
 Paperless-ngx 3.4 (web server + consumer in one container, Valkey broker, SQLite) on **coke** (`apps: [authentik, paperless]` in
-`nodes/coke.yml`). Reachable at `https://paperless.service.veronoi.cc`, **mesh-only** (domain scheme: root [README](../../README.md),
+`nodes/coke.yml`). Reachable at `https://paperless.service.veronoi.cc`, **public + mesh** (domain scheme: root [README](../../README.md),
 Domain scheme), and login only through Authentik (`auth.veronoi.cc`, OIDC). Declarative: Quadlets and settings via `apps-sync`,
 secrets as `secrets/coke/paperless.env.sops` via `secrets-sync`. Generic mechanics: root README.
 
 ## Topology
 
 ```
-laptop on the mesh --443--> ecstasy (100.127.17.6): Traefik `mesh` entrypoint, wildcard *.service.veronoi.cc
+browser/app --443--> ecstasy: Traefik `websecure` (176.65.149.212) or `mesh` (100.127.17.6), wildcard *.service.veronoi.cc
                               |  http, over the NetBird mesh
                               v
                             coke: paperless on 100.127.197.215:8000  (nothing else listens for the outside)
@@ -46,7 +46,11 @@ user at the first SSO login. Who may log in is decided in Authentik: the applica
 session too (`PAPERLESS_LOGOUT_REDIRECT_URL` -> `.../application/o/paperless/end-session/`).
 
 Note: `PAPERLESS_DISABLE_REGULAR_LOGIN` does not disable the Django admin login (`/admin/`) nor API login with local credentials. Both only
-work for a user with a local password, and SSO users have none; the mesh-only exposure is the other layer.
+work for a user with a local password, and SSO users have none. As the service is public, ecstasy's Traefik additionally answers `403` for
+`/admin` on the public entrypoint (`paperless-admin-public` in [`apps/paperless-route`](../paperless-route/README.md)); on the mesh it stays reachable.
+
+**Mobile apps and API clients** cannot do the browser SSO flow and regular login is disabled: create an API token in Paperless (My Profile -> API token)
+and enter it in the app instead of a password (`Authorization: Token <token>`).
 
 ### First superuser (one-time)
 
@@ -65,10 +69,10 @@ It prints `1`. Reload the page: the user now has the admin settings. (`/usr/src/
 
 | # | Where | Step |
 |---|---|---|
-| 1 | NetBird dashboard | DNS -> Zones -> zone `service.veronoi.cc` (create it if it does not exist yet, root README, Domain scheme) -> add **A** record `paperless` -> `100.127.17.6`. No Cloudflare record: the service is mesh-only. |
+| 1 | Cloudflare | Nothing per service: the wildcard record `*.service` -> `176.65.149.212` (grey cloud, root README, Domain scheme) covers `paperless.service.veronoi.cc`. Create it once if it does not exist. No NetBird zone is needed. |
 | 2 | git | Merge. `secrets/coke/paperless.env.sops` and `secrets/coke/authentik-paperless.env.sops` are already encrypted (to your admin key and coke's key). |
 | 3 | coke | `sudo systemctl start secrets-sync apps-sync` (or wait up to 15/10 min). Authentik's worker applies the blueprint, Paperless starts and runs its migrations (first start takes a minute). |
-| 4 | browser (on the mesh) | `https://paperless.service.veronoi.cc`: you are redirected to Authentik, log in as an `authentik Admins` member. Then promote the user (above). |
+| 4 | browser | `https://paperless.service.veronoi.cc` (public or on the mesh): you are redirected to Authentik, log in as an `authentik Admins` member. Then promote the user (above). |
 
 The OIDC client secret exists in two encrypted files, byte-identical: `authentik-paperless.env.sops` (read by the Authentik worker's blueprint
 via `!Env`) and inside `PAPERLESS_SOCIALACCOUNT_PROVIDERS` in `paperless.env.sops` (Paperless does not expand variables in that JSON).
