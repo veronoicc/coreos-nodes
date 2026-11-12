@@ -124,7 +124,8 @@ checksum file, so its sha256 was computed from the official asset). Checked on a
 Targets: ecstasy: `netbird.env.sops` -> `/var/data/secrets/netbird.env` (0600 root, restarts `netbird.service`, the client) and
 `netbird-server.yaml.sops` -> `/var/data/netbird-server/config.yaml` (restarts the two NetBird server units, see
 [`apps/netbird/README.md`](apps/netbird/README.md)); coke: `netbird.env.sops` (same) and `authentik.env.sops` ->
-`/var/data/secrets/authentik.env` (restarts the three Authentik units, see [`apps/authentik/README.md`](apps/authentik/README.md)).
+`/var/data/secrets/authentik.env` (restarts the three Authentik units, see [`apps/authentik/README.md`](apps/authentik/README.md)) and
+`paperless.env.sops` -> `/var/data/secrets/paperless.env` (restarts the two Paperless units, see [`apps/paperless/README.md`](apps/paperless/README.md)).
 The repo ships only the manifest lines.
 
 **Files that do not exist yet:** a manifest line whose encrypted file is not in the folder is **skipped with one log line**

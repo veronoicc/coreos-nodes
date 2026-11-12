@@ -1,7 +1,8 @@
-"""The apps under apps/ (traefik, netbird, authentik, authentik-route) are declarative: lint the repo files.
+"""The apps under apps/ (traefik, netbird, authentik, authentik-route, paperless) are declarative: lint the repo files.
 
 Everything here runs without a VM. tests/test_smoke_qemu.py boots the real thing."""
 import ipaddress
+import json
 import os
 import re
 import subprocess
@@ -68,8 +69,8 @@ def targets(node):
 
 
 def test_apps_and_node_lists():
-    assert {p.name for p in APPS.iterdir()} == {"traefik", "netbird", "authentik", "authentik-route"}
-    assert NODES == {"ecstasy": ["traefik", "netbird", "authentik-route"], "coke": ["authentik"]}
+    assert {p.name for p in APPS.iterdir()} == {"traefik", "netbird", "authentik", "authentik-route", "paperless"}
+    assert NODES == {"ecstasy": ["traefik", "netbird", "authentik-route"], "coke": ["authentik", "paperless"]}
     assert not (ROOT / "tests" / "test_netbird_backend.py").exists()
 
 
@@ -163,6 +164,8 @@ def test_images_pinned():
     assert re.fullmatch(r"ghcr\.io/goauthentik/server:20\d\d\.\d+\.\d+", img["authentik-server"])
     assert img["authentik-server"] == img["authentik-worker"]
     assert re.fullmatch(r"docker\.io/library/postgres:\d+\.\d+-alpine", img["authentik-postgres"])
+    assert re.fullmatch(r"ghcr\.io/paperless-ngx/paperless-ngx:\d+\.\d+\.\d+", img["paperless"])
+    assert re.fullmatch(r"docker\.io/valkey/valkey:\d+-alpine", img["paperless-valkey"])
 
 
 @pytest.mark.parametrize("vol", sorted(p for a in NODES_ALL for p in (APPS / a).glob("*.volume")), ids=lambda p: p.name)
@@ -461,6 +464,56 @@ def walk(node):
         yield from walk(node.value)
 
 
+# -------------------------------------------------------------- paperless
+
+
+def test_paperless_is_published_on_the_mesh_address_only():
+    cs = containers("paperless")
+    assert set(cs) == {"paperless", "paperless-valkey"}
+    publish = cs["paperless"]["Container"]["PublishPort"]
+    assert len(publish) == 1, publish
+    ip, host_port, container_port = publish[0].split(":")
+    assert ipaddress.ip_address(ip) in MESH, f"{ip} must be a NetBird mesh address (100.64.0.0/10), never 0.0.0.0"
+    assert (host_port, container_port) == ("8000", "8000")
+    assert "PublishPort" not in cs["paperless-valkey"]["Container"]
+    # boot ordering: the client creates the mesh interface; retry forever until it exists
+    u = cs["paperless"]
+    assert "netbird.service" in u["Unit"]["After"][0].split() and "netbird.service" in u["Unit"]["Wants"][0].split()
+    assert u["Unit"]["StartLimitIntervalSec"] == ["0"] and u["Service"]["Restart"] == ["on-failure"]
+    assert u["Unit"]["Requires"] == ["paperless-valkey.service"] and "paperless-valkey.service" in u["Unit"]["After"][0].split()
+
+
+def test_paperless_units_gated_on_the_rendered_secrets():
+    dest = "/var/data/secrets/paperless.env"
+    file, d, mode, owner, restart = next(l for l in targets("coke") if l[0] == "paperless.env.sops")
+    assert (d, mode, owner) == (dest, "0600", "root:root")
+    assert set(restart.split(",")) == {"paperless.service", "paperless-valkey.service"}  # every gated unit is (re)started
+    for name, q in containers("paperless").items():
+        assert q["Unit"]["ConditionPathExists"] == [dest], name
+    c = containers("paperless")["paperless"]["Container"]
+    assert c["EnvironmentFile"] == ["/etc/containers/systemd/apps/paperless/settings.env", dest]
+    assert c["Network"] == ["paperless.network"] and containers("paperless")["paperless-valkey"]["Container"]["Network"] == ["paperless.network"]
+    assert sorted(c["Volume"]) == ["paperless-data.volume:/usr/src/paperless/data", "paperless-media.volume:/usr/src/paperless/media"]
+
+
+def test_paperless_settings():
+    env = env_file(APPS / "paperless" / "settings.env")
+    assert not [k for k in env if "PASSWORD" in k or "SECRET" in k or k == "PAPERLESS_SOCIALACCOUNT_PROVIDERS"], "secrets only come from the rendered env file"
+    broker = containers("paperless")["paperless-valkey"]["Container"]["ContainerName"][0]
+    assert env["PAPERLESS_REDIS"] == f"redis://{broker}:6379"
+    assert env["PAPERLESS_URL"] == "https://paperless.service.veronoi.cc"
+    # behind ecstasy's Traefik: trust exactly its mesh IP for X-Forwarded-*, build https URLs
+    assert env["PAPERLESS_TRUSTED_PROXIES"] == MESH_IP
+    assert env["PAPERLESS_USE_X_FORWARD_HOST"] == env["PAPERLESS_USE_X_FORWARD_PORT"] == "true"
+    assert json.loads(env["PAPERLESS_PROXY_SSL_HEADER"]) == ["HTTP_X_FORWARDED_PROTO", "https"]
+    # login only via Authentik (OIDC)
+    assert env["PAPERLESS_APPS"] == "allauth.socialaccount.providers.openid_connect"
+    assert {env[k] for k in ("PAPERLESS_DISABLE_REGULAR_LOGIN", "PAPERLESS_REDIRECT_LOGIN_TO_SSO", "PAPERLESS_SOCIAL_AUTO_SIGNUP")} == {"true"}
+    assert env["PAPERLESS_ACCOUNT_ALLOW_SIGNUPS"] == "false"
+    assert env["PAPERLESS_LOGOUT_REDIRECT_URL"] == "https://auth.veronoi.cc/application/o/paperless/end-session/"
+
+
+
 # ---------------------------------------------- README recipes with real sops
 
 
@@ -577,7 +630,7 @@ def test_no_private_keys_or_plaintext_config_in_the_repo():
         if rel.parts[0] not in ("tests",) and p.name != "README.md":
             # plaintext NetBird config / Authentik env would carry these keys with a literal value
             assert not re.search(rb"(?m)^\s*(encryptionKey|authSecret|sessionCookieEncryptionKey):\s*[\"']?[A-Za-z0-9+/=]{16,}", data), rel
-            assert not re.search(rb"(?m)^(AUTHENTIK_SECRET_KEY|POSTGRES_PASSWORD|AUTHENTIK_POSTGRESQL__PASSWORD|AUTHENTIK_NETBIRD_CLIENT_SECRET)=[^E\s]", data), rel
+            assert not re.search(rb"(?m)^(AUTHENTIK_SECRET_KEY|POSTGRES_PASSWORD|AUTHENTIK_POSTGRESQL__PASSWORD|AUTHENTIK_NETBIRD_CLIENT_SECRET|PAPERLESS_SECRET_KEY|PAPERLESS_SOCIALACCOUNT_PROVIDERS)=[^E\s]", data), rel
     for forbidden in (ROOT / "secrets" / "ecstasy" / "config.yaml", ROOT / "secrets" / "coke" / "authentik.env", APPS / "netbird" / "config.yaml"):
         assert not forbidden.exists()
 

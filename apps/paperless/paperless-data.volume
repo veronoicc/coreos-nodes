@@ -1,0 +1,5 @@
+# apps-sync: keep
+# Paperless /usr/src/paperless/data: SQLite database, search index, classifier model.
+# Persistent: `apps-sync reset paperless` keeps it, only `apps-sync reset --include-persistent paperless` removes it.
+[Volume]
+VolumeName=paperless-data

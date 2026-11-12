@@ -1,0 +1,32 @@
+[Unit]
+Description=Paperless-ngx
+Wants=network-online.target netbird.service
+# netbird.service is the baked NetBird client: the mesh interface (wt0) has to exist before the port can be bound to the
+# mesh address. It is only ordered, not required; if the bind still fails the unit is retried (below).
+After=network-online.target netbird.service paperless-valkey.service
+Requires=paperless-valkey.service
+RequiresMountsFor=/var/data
+# /var/data/secrets/paperless.env is rendered by secrets-sync (secrets/coke/paperless.env.sops); until then the unit is skipped
+# instead of crash-looping, and secrets-sync restarts both Paperless units when it appears or changes.
+ConditionPathExists=/var/data/secrets/paperless.env
+# Retry forever: after a reboot the mesh address appears some seconds after the client started.
+StartLimitIntervalSec=0
+
+[Container]
+Image=ghcr.io/paperless-ngx/paperless-ngx:3.4.2
+ContainerName=paperless
+Network=paperless.network
+# Reachable ONLY on the mesh address of this node (stable per NetBird peer), never on 0.0.0.0, so a public interface
+# can never serve it. The same address is in apps/paperless-route/routes.yml; edit both if the peer is re-registered.
+PublishPort=100.127.197.215:8000:8000
+EnvironmentFile=/etc/containers/systemd/apps/paperless/settings.env
+EnvironmentFile=/var/data/secrets/paperless.env
+Volume=paperless-data.volume:/usr/src/paperless/data
+Volume=paperless-media.volume:/usr/src/paperless/media
+
+[Service]
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

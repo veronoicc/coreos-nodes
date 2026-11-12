@@ -1,0 +1,20 @@
+[Unit]
+Description=Paperless-ngx Valkey (task broker)
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/var/data
+# Gated like paperless.service: /var/data/secrets/paperless.env is rendered by secrets-sync (secrets/coke/paperless.env.sops);
+# until then the unit is skipped, and secrets-sync restarts both Paperless units when it appears or changes.
+ConditionPathExists=/var/data/secrets/paperless.env
+
+[Container]
+Image=docker.io/valkey/valkey:9-alpine
+ContainerName=paperless-valkey
+Network=paperless.network
+# No volume: the broker only holds the task queue, losing it on a restart is harmless.
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

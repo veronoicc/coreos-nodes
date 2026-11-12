@@ -1,0 +1,5 @@
+# apps-sync: keep
+# Paperless /usr/src/paperless/media: the stored documents (originals, archive PDFs, thumbnails).
+# Persistent: `apps-sync reset paperless` keeps it, only `apps-sync reset --include-persistent paperless` removes it.
+[Volume]
+VolumeName=paperless-media

@@ -1,0 +1,3 @@
+[Network]
+# Private network of the Paperless stack: the Valkey broker is only reachable from here, nothing is published except the
+# Paperless HTTP port on the mesh address (see paperless.container).
