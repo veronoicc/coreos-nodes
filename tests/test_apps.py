@@ -851,6 +851,15 @@ def test_scanservjs_static_scanner_and_no_ignored_discovery():
     assert "[options]" in conf and "discovery = disable" in conf
 
 
+def test_scanservjs_network_mtu_fits_the_path_to_the_printer():
+    # coke reaches the printer over NetBird via the Home Assistant routing peer; that path silently drops packets of
+    # ~1300 bytes (measured on coke: MSS 1100 delivers ScannerCapabilities, MSS 1200 and NetBird's own clamp 1240 stall
+    # after the headers). The container's MSS follows its interface MTU, so its network carries MTU 1140 (MSS 1100).
+    c = containers("scanservjs")["scanservjs"]["Container"]
+    assert c["Network"] == ["scanservjs.network"]
+    assert parse_quadlet(APPS / "scanservjs" / "scanservjs.network")["Network"]["Options"] == ["mtu=1140"]
+
+
 def test_scanservjs_config_local_js():
     js = (APPS / "scanservjs" / "config.local.js").read_text()
     assert "config.batchModes = ['none', 'manual'];" in js

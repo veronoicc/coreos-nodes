@@ -1,0 +1,6 @@
+[Network]
+# Own network for scanservjs with a small MTU: coke reaches the printer over NetBird via the Home Assistant routing peer, and
+# that path silently drops packets of about 1300 bytes (measured on coke: TCP MSS 1100 delivers the 5 KB ScannerCapabilities,
+# MSS 1200 and NetBird's own clamp 1240 stall after the headers, so sane-airscan fails with "Error during device I/O").
+# The container's MSS follows this MTU: 1140 - 40 = 1100.
+Options=mtu=1140

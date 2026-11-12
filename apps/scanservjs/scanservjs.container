@@ -12,6 +12,8 @@ StartLimitIntervalSec=0
 [Container]
 Image=docker.io/sbs20/scanservjs:3.3.0
 ContainerName=scanservjs
+# MTU 1140 for the path to the printer, see scanservjs.network.
+Network=scanservjs.network
 # Reachable ONLY on the mesh address of this node, never on 0.0.0.0 (scanservjs has no login of its own). The same address
 # is in apps/scanservjs/routes.yml; edit both if the peer is re-registered.
 PublishPort=100.127.197.215:8081:8080

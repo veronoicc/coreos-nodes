@@ -41,6 +41,11 @@ is scanservjs's own 8080.
 - `printer.device` is pinned with `AddHost=printer.device:10.0.0.34` (the container's resolver does not know the LAN name).
 - The scanner is reached from coke over the NetBird mesh. **NetBird policy needed: coke -> Printer, TCP 8080** (the eSCL port; port 80 is only the
   printer's web UI).
+- **MTU:** the path coke -> NetBird -> Home Assistant -> printer silently drops packets of about 1300 bytes (a path MTU black hole between
+  the two sites; measured on coke: MSS 1100 delivers the 5 KB `ScannerCapabilities`, MSS 1200 and NetBird's clamp 1240 stall after the
+  headers). Small requests (`ScannerStatus`) still work, opening the device fails with `Error during device I/O`. scanservjs therefore runs
+  on `scanservjs.network` with `mtu=1140` (MSS 1100). The proper fix is at the link between the sites (MTU/MSS clamping on the site-to-site
+  path, or letting ICMP "fragmentation needed" through); then this network option can go.
 
 ## Defaults and pipelines (`config.local.js`)
 
