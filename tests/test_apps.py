@@ -602,7 +602,7 @@ def test_paperless_settings():
     assert env["PAPERLESS_APPS"] == "allauth.socialaccount.providers.openid_connect"
     assert {env[k] for k in ("PAPERLESS_DISABLE_REGULAR_LOGIN", "PAPERLESS_REDIRECT_LOGIN_TO_SSO", "PAPERLESS_SOCIAL_AUTO_SIGNUP")} == {"true"}
     assert env["PAPERLESS_ACCOUNT_ALLOW_SIGNUPS"] == "false"
-    assert env["PAPERLESS_LOGOUT_REDIRECT_URL"] == "https://auth.veronoi.cc/application/o/paperless/end-session/"
+    assert env["PAPERLESS_LOGOUT_REDIRECT_URL"] == "https://auth.service.veronoi.cc/application/o/paperless/end-session/"
 
 
 
