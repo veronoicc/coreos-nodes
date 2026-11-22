@@ -156,6 +156,23 @@ def test_bad_ssh_port_rejected(bad):
         build_ign(base_config(), node=base_node(ssh_port=bad))
 
 
+NONLOCAL_BIND = "/etc/sysctl.d/90-traefik-nonlocal-bind.conf"
+
+
+def test_traefik_node_may_bind_mesh_ip_before_netbird():
+    ign = build_ign(base_config(), node=base_node(apps=["traefik"]))
+    files = {f["path"]: f for f in ign["storage"]["files"]}
+    assert files[NONLOCAL_BIND]["mode"] == 0o644
+    text = ign_file(ign, NONLOCAL_BIND)
+    assert text.splitlines()[0].startswith("#")
+    assert text.endswith("net.ipv4.ip_nonlocal_bind = 1\n")
+
+
+def test_non_traefik_node_has_no_nonlocal_bind():
+    ign = build_ign(base_config(), node=base_node(apps=[]))
+    assert NONLOCAL_BIND not in {f["path"] for f in ign["storage"]["files"]}
+
+
 def test_netbird_quadlet_gated_and_secret_free(ign):
     q = ign_file(ign, "/etc/containers/systemd/netbird.container")
     lines = q.splitlines()

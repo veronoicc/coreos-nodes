@@ -78,6 +78,7 @@ No ACME email is configured (nothing personal in a public repo): expiry notice m
 The mesh IP only exists once the baked NetBird client (`netbird.service`) created `wt0`. `traefik.service` therefore has
 `Wants=`/`After=netbird.service`, `StartLimitIntervalSec=0` and `Restart=on-failure` + `RestartSec=10` (the pattern of `authentik-server`):
 a failed bind is retried until the address exists. Without that, a reboot could leave Traefik down, public routes included.
+Because NetBird's management server is itself reached through Traefik, waiting for `wt0` would deadlock the boot: `build.py` therefore bakes `net.ipv4.ip_nonlocal_bind = 1` (`/etc/sysctl.d/90-traefik-nonlocal-bind.conf`) into every node that runs Traefik, so it can bind the mesh IP before the address exists.
 Publishing on specific host IPs keeps working for ecstasy itself and for containers reaching `mesh.sapphic.world` through the public IP
 (netavark matches `daddr <ip>` in its DNAT chain for both forwarded and locally generated traffic); a plain `curl https://mesh.sapphic.world`
 on the node after the deploy confirms it. Real client IPs in the access log depend on the `NB_FWMARK_BASE` fix (root README, tested in

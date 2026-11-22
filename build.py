@@ -437,6 +437,12 @@ def render(config, name, node, root=ROOT):
     keyfile = network_keyfile(name, node.get("network"))
     if keyfile:
         butane["storage"]["files"].append(inline_file(keyfile_path(name), keyfile, 0o600))
+    if "traefik" in node_apps(name, node, root):
+        butane["storage"]["files"].append(inline_file(
+            "/etc/sysctl.d/90-traefik-nonlocal-bind.conf",
+            "# Traefik binds the mesh IP before NetBird's wt0 exists, and NetBird's management server is reached through Traefik.\n"
+            "net.ipv4.ip_nonlocal_bind = 1\n",
+        ))
     port = ssh_port(name, node)
     if port != 22:
         butane["storage"]["files"] += [
