@@ -185,7 +185,7 @@ def test_forgejo_node_gets_ci_slice_with_memory_cap():
         "Description=Forgejo Actions CI (docker:dind daemons); hard memory cap so CI jobs never OOM-kill other services\n"
         "\n"
         "[Slice]\n"
-        "MemoryMax=4G\n"
+        "MemoryMax=32G\n"
     )
 
 

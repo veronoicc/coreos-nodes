@@ -1299,7 +1299,7 @@ def test_only_dind_is_privileged(app, name, q):
 
 @pytest.mark.parametrize("app,name,q", all_containers(), ids=lambda v: v if isinstance(v, str) else "")
 def test_only_dind_is_in_the_ci_slice(app, name, q):
-    """Slice rendered by build.py (forgejo-ci.slice, MemoryMax=4G); Quadlet's --cgroups=split puts the container under the unit's cgroup."""
+    """Slice rendered by build.py (forgejo-ci.slice, MemoryMax=32G); Quadlet's --cgroups=split puts the container under the unit's cgroup."""
     slice_ = q.get("Service", {}).get("Slice")
     assert slice_ == (["forgejo-ci.slice"] if name.startswith("forgejo-dind-") else None), name
 
@@ -1400,4 +1400,4 @@ def test_forgejo_runner_config():
                            "docker:docker://docker.io/library/node:22-bookworm"]
     assert r["envs"] == {"DOCKER_HOST": "tcp://localhost:2376", "DOCKER_TLS_VERIFY": "1", "DOCKER_CERT_PATH": "/certs/client"}
     assert c["network"] == "host" and c["privileged"] is False and c["docker_host"] == "-" and c["valid_volumes"] == ["/certs/client"]
-    assert c["options"] == "-v /certs/client:/certs/client:ro --memory=2g --cpus=2"
+    assert c["options"] == "-v /certs/client:/certs/client:ro --memory=3200m --cpus=2"

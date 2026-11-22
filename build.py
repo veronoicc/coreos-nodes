@@ -174,7 +174,7 @@ FORGEJO_CI_SLICE = """[Unit]
 Description=Forgejo Actions CI (docker:dind daemons); hard memory cap so CI jobs never OOM-kill other services
 
 [Slice]
-MemoryMax=4G
+MemoryMax=32G
 """
 
 
