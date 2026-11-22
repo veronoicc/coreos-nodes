@@ -1,0 +1,2 @@
+[Network]
+# Private network of Forgejo. Only HTTP and SSH are published, on the mesh address (see forgejo.container).

@@ -1,0 +1,31 @@
+# Traefik routes for git.sapphic.world. Forgejo runs on coke, which accepts no inbound connections: Traefik reaches it over the
+# NetBird mesh at coke's mesh address. HTTP: public and mesh. Git SSH arrives on Traefik's `gitssh` entrypoint (port 22 of
+# ecstasy's public and mesh IP, plain TCP, no TLS) and is forwarded to Forgejo's built-in SSH server.
+# MESH ADDRESS: the same address and ports are in apps/forgejo/forgejo.container (PublishPort); a test checks they match.
+# See apps/forgejo/README.md.
+http:
+  routers:
+    forgejo:
+      rule: Host(`git.sapphic.world`)
+      entryPoints: [websecure, mesh]
+      tls:
+        certResolver: letsencrypt-dns
+        domains:
+          - main: "*.sapphic.world"
+      service: forgejo
+  services:
+    forgejo:
+      loadBalancer:
+        servers:
+          - url: http://100.127.197.215:3001
+tcp:
+  routers:
+    forgejo-ssh:
+      rule: HostSNI(`*`)
+      entryPoints: [gitssh]
+      service: forgejo-ssh
+  services:
+    forgejo-ssh:
+      loadBalancer:
+        servers:
+          - address: 100.127.197.215:2222

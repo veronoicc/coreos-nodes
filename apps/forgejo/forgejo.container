@@ -1,0 +1,47 @@
+[Unit]
+Description=Forgejo (git.sapphic.world; login via Authentik; git SSH via Traefik on ecstasy port 22)
+Wants=network-online.target netbird.service
+# netbird.service is the baked NetBird client: the mesh interface (wt0) has to exist before the ports can be bound to the
+# mesh address. It is only ordered, not required; if the bind still fails the unit is retried (below).
+After=network-online.target netbird.service
+RequiresMountsFor=/var/data
+# /var/data/secrets/forgejo.env and forgejo-runners.env are rendered by secrets-sync (secrets/coke/*.env.sops); until both exist
+# the unit is skipped instead of crash-looping, and secrets-sync restarts it when either appears or changes.
+ConditionPathExists=/var/data/secrets/forgejo.env
+ConditionPathExists=/var/data/secrets/forgejo-runners.env
+# Retry forever: after a reboot the mesh address appears some seconds after the client started.
+StartLimitIntervalSec=0
+
+[Container]
+Image=codeberg.org/forgejo/forgejo:17.0.2-rootless
+ContainerName=forgejo
+Network=forgejo.network
+# Reachable ONLY on the mesh address of this node, never on 0.0.0.0: HTTP and Forgejo's built-in SSH server. The same
+# addresses are in apps/forgejo/routes.yml (Traefik on ecstasy forwards 443 and, as plain TCP, port 22); edit both if the
+# peer is re-registered.
+PublishPort=100.127.197.215:3001:3000
+PublishPort=100.127.197.215:2222:2222
+EnvironmentFile=/etc/containers/systemd/apps/forgejo/settings.env
+# FORGEJO__security__SECRET_KEY and AUTHENTIK_FORGEJO_CLIENT_SECRET (forgejo-setup.sh reads it for the login source).
+# Read by podman, not systemd: SELinux denies systemd (init_t) reading /var/data (var_t).
+EnvironmentFile=/var/data/secrets/forgejo.env
+# FORGEJO_RUNNER_{1,2,3}_SECRET: forgejo-setup.sh registers the three runners from them (the runners read the same file).
+EnvironmentFile=/var/data/secrets/forgejo-runners.env
+Volume=forgejo-data.volume:/var/lib/gitea
+Volume=/etc/containers/systemd/apps/forgejo/forgejo-setup.sh:/usr/local/share/forgejo-setup.sh:ro,z
+HealthCmd=curl -fsS -o /dev/null http://127.0.0.1:3000/api/healthz
+HealthInterval=10s
+HealthStartPeriod=60s
+HealthRetries=5
+# systemd considers the unit started once healthy, so ExecStartPost runs against a working database.
+Notify=healthy
+
+[Service]
+# Idempotent login source + runner registration, on every start (see forgejo-setup.sh).
+ExecStartPost=/usr/bin/podman exec forgejo /bin/sh /usr/local/share/forgejo-setup.sh
+TimeoutStartSec=600
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

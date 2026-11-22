@@ -4,11 +4,12 @@ Wants=network-online.target
 After=network-online.target authentik-postgres.service
 Requires=authentik-postgres.service
 RequiresMountsFor=/var/data
-# /var/data/secrets/authentik.env, authentik-paperless.env and authentik-grafana.env are rendered by secrets-sync (secrets/coke/*.env.sops); until all
+# /var/data/secrets/authentik.env, authentik-paperless.env, authentik-grafana.env and authentik-forgejo.env are rendered by secrets-sync (secrets/coke/*.env.sops); until all
 # exist the unit is skipped instead of crash-looping, and secrets-sync restarts it when any appears or changes.
 ConditionPathExists=/var/data/secrets/authentik.env
 ConditionPathExists=/var/data/secrets/authentik-paperless.env
 ConditionPathExists=/var/data/secrets/authentik-grafana.env
+ConditionPathExists=/var/data/secrets/authentik-forgejo.env
 
 [Container]
 Image=ghcr.io/goauthentik/server:2026.8.5
@@ -23,6 +24,8 @@ EnvironmentFile=/var/data/secrets/authentik.env
 EnvironmentFile=/var/data/secrets/authentik-paperless.env
 # AUTHENTIK_GRAFANA_CLIENT_SECRET for the Grafana blueprint (secrets/coke/authentik-grafana.env.sops, see apps/monitoring/README.md).
 EnvironmentFile=/var/data/secrets/authentik-grafana.env
+# AUTHENTIK_FORGEJO_CLIENT_SECRET for the Forgejo blueprint (secrets/coke/authentik-forgejo.env.sops, see apps/forgejo/README.md).
+EnvironmentFile=/var/data/secrets/authentik-forgejo.env
 Volume=authentik-data.volume:/data
 Volume=authentik-certs.volume:/certs
 # Blueprint: declares the NetBird OIDC provider and application (README.md). The worker applies it; its client secret
@@ -32,6 +35,8 @@ Volume=/etc/containers/systemd/apps/authentik/netbird-blueprint.yaml:/blueprints
 Volume=/etc/containers/systemd/apps/authentik/paperless-blueprint.yaml:/blueprints/custom/paperless.yaml:ro,z
 # Blueprint: declares the Grafana OIDC provider, application and its group binding; client secret via !Env (above).
 Volume=/etc/containers/systemd/apps/authentik/grafana-blueprint.yaml:/blueprints/custom/grafana.yaml:ro,z
+# Blueprint: declares the Forgejo OIDC provider, application and its group binding; client secret via !Env (above).
+Volume=/etc/containers/systemd/apps/authentik/forgejo-blueprint.yaml:/blueprints/custom/forgejo.yaml:ro,z
 
 [Service]
 Restart=on-failure

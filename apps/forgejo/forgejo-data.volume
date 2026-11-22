@@ -1,0 +1,5 @@
+# apps-sync: keep
+# Forgejo /var/lib/gitea: app.ini (incl. the generated INTERNAL_TOKEN/JWT secrets), SQLite database, repositories, packages, SSH host keys.
+# Persistent: `apps-sync reset forgejo` keeps it, only `apps-sync reset --include-persistent forgejo` removes it.
+[Volume]
+VolumeName=forgejo-data

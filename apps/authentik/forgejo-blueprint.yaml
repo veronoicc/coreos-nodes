@@ -1,0 +1,44 @@
+# Authentik blueprint: OIDC provider + application for Forgejo (Forgejo is the client: login source `authentik`, type OpenID Connect).
+# Mounted into the worker as /blueprints/custom/forgejo.yaml; the client secret is read from the worker's environment
+# (secrets/coke/authentik-forgejo.env.sops, AUTHENTIK_FORGEJO_CLIENT_SECRET). The same value is in secrets/coke/forgejo.env.sops;
+# apps/forgejo/forgejo-setup.sh creates the Forgejo login source `authentik` from it. Forgejo's settings are in apps/forgejo/settings.env.
+version: 1
+metadata:
+  name: Forgejo
+entries:
+  - model: authentik_providers_oauth2.oauth2provider
+    id: forgejo-provider
+    identifiers:
+      name: Forgejo
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      client_type: confidential
+      client_id: forgejo
+      client_secret: !Env AUTHENTIK_FORGEJO_CLIENT_SECRET
+      # Defaults to an empty list: without it every login fails "Invalid grant_type for provider".
+      grant_types: [authorization_code, refresh_token]
+      # Forgejo's callback for the login source named `authentik`: <root_url>user/oauth2/authentik/callback.
+      redirect_uris:
+        - matching_mode: strict
+          url: https://git.sapphic.world/user/oauth2/authentik/callback
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+      # The `profile` scope carries preferred_username and the `groups` claim that forgejo-setup.sh maps to site admin.
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
+  - model: authentik_core.application
+    identifiers:
+      slug: forgejo
+    attrs:
+      name: Forgejo
+      provider: !KeyOf forgejo-provider
+      meta_launch_url: https://git.sapphic.world
+  # Only the group `authentik Admins` may use the application: with a binding present, everyone else is denied.
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !Find [authentik_core.application, [slug, forgejo]]
+      order: 0
+    attrs:
+      group: !Find [authentik_core.group, [name, authentik Admins]]

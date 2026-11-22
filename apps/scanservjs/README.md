@@ -24,7 +24,7 @@ browser/phone --443--> ecstasy: Traefik `mesh` entrypoint (scan.service.veronoi.
 | `routes.yml` | `scan.service.veronoi.cc` on `entryPoints: [mesh]` to `http://100.127.197.215:8081` (a test checks it matches `PublishPort`). |
 | `../paperless/paperless-consume.volume` | The shared consume folder (persistent, `# apps-sync: keep`), part of the Paperless app. |
 
-Port 8081: 8000 (Paperless), 9000 (Authentik), 3000 (Grafana) and 5432 (TimescaleDB) are taken on coke's mesh address. The container port
+Port 8081: 8000 (Paperless), 9000 (Authentik), 3000 (Grafana), 5432 (TimescaleDB), 3001 (Forgejo HTTP) and 2222 (Forgejo SSH) are taken on coke's mesh address. The container port
 is scanservjs's own 8080.
 
 ## Scanner configuration (checked against the scanservjs v3.3.0 sources)

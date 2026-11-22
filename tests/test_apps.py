@@ -70,8 +70,8 @@ def targets(node):
 
 
 def test_apps_and_node_lists():
-    assert {p.name for p in APPS.iterdir()} == {"traefik", "netbird", "authentik", "paperless", "monitoring", "scanservjs"}
-    assert NODES == {"ecstasy": ["traefik", "netbird"], "coke": ["authentik", "paperless", "monitoring", "scanservjs"]}
+    assert {p.name for p in APPS.iterdir()} == {"traefik", "netbird", "authentik", "paperless", "monitoring", "scanservjs", "forgejo"}
+    assert NODES == {"ecstasy": ["traefik", "netbird"], "coke": ["authentik", "paperless", "monitoring", "scanservjs", "forgejo"]}
     assert not (ROOT / "tests" / "test_netbird_backend.py").exists()
 
 
@@ -150,7 +150,7 @@ def test_container_hygiene(app, name, q):
     assert c["ContainerName"] == [name]
     assert "AutoUpdate" not in c
     image = c["Image"][0]
-    assert re.fullmatch(r"(docker\.io|ghcr\.io)/[\w/.-]+:[\w.-]+", image) and not image.endswith(":latest"), image
+    assert re.fullmatch(r"(docker\.io|ghcr\.io|codeberg\.org|code\.forgejo\.org)/[\w/.-]+:[\w.-]+", image) and not image.endswith(":latest"), image
     assert not re.search(r"sock", "".join(c.get("Volume", [])))
     for env in c.get("EnvironmentFile", []):
         assert env.startswith((f"/etc/containers/systemd/apps/{app}/", "/var/data/secrets/")), env
@@ -174,6 +174,7 @@ def test_images_pinned():
     assert re.fullmatch(r"docker\.io/timescale/timescaledb:\d+\.\d+\.\d+-pg17", img["timescaledb"])
     assert re.fullmatch(r"docker\.io/grafana/grafana:\d+\.\d+\.\d+", img["grafana"])
     assert re.fullmatch(r"docker\.io/sbs20/scanservjs:\d+\.\d+\.\d+", img["scanservjs"])
+    assert re.fullmatch(r"codeberg\.org/forgejo/forgejo:\d+\.\d+\.\d+-rootless", img["forgejo"])
 
 
 @pytest.mark.parametrize("vol", sorted(p for a in NODES_ALL for p in (APPS / a).glob("*.volume")), ids=lambda p: p.name)
@@ -1071,8 +1072,8 @@ def test_no_private_keys_or_plaintext_config_in_the_repo():
         if rel.parts[0] not in ("tests",) and p.name != "README.md":
             # plaintext NetBird config / Authentik env would carry these keys with a literal value
             assert not re.search(rb"(?m)^\s*(encryptionKey|authSecret|sessionCookieEncryptionKey):\s*[\"']?[A-Za-z0-9+/=]{16,}", data), rel
-            assert not re.search(rb"(?m)^(AUTHENTIK_SECRET_KEY|POSTGRES_PASSWORD|AUTHENTIK_POSTGRESQL__PASSWORD|AUTHENTIK_NETBIRD_CLIENT_SECRET|AUTHENTIK_PAPERLESS_CLIENT_SECRET|AUTHENTIK_GRAFANA_CLIENT_SECRET|PAPERLESS_SECRET_KEY|PAPERLESS_SOCIALACCOUNT_PROVIDERS|GRAFANA_DB_PASSWORD|GF_SECURITY_ADMIN_PASSWORD|GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET)=[^E\s]", data), rel
-    for forbidden in (ROOT / "secrets" / "ecstasy" / "config.yaml", ROOT / "secrets" / "coke" / "authentik.env", ROOT / "secrets" / "coke" / "paperless.env", ROOT / "secrets" / "coke" / "authentik-paperless.env", ROOT / "secrets" / "coke" / "monitoring.env", ROOT / "secrets" / "coke" / "authentik-grafana.env", APPS / "netbird" / "config.yaml"):
+            assert not re.search(rb"(?m)^(AUTHENTIK_SECRET_KEY|POSTGRES_PASSWORD|AUTHENTIK_POSTGRESQL__PASSWORD|AUTHENTIK_NETBIRD_CLIENT_SECRET|AUTHENTIK_PAPERLESS_CLIENT_SECRET|AUTHENTIK_GRAFANA_CLIENT_SECRET|AUTHENTIK_FORGEJO_CLIENT_SECRET|FORGEJO__security__SECRET_KEY|FORGEJO_RUNNER_\d_SECRET|PAPERLESS_SECRET_KEY|PAPERLESS_SOCIALACCOUNT_PROVIDERS|GRAFANA_DB_PASSWORD|GF_SECURITY_ADMIN_PASSWORD|GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET)=[^E\s]", data), rel
+    for forbidden in (ROOT / "secrets" / "ecstasy" / "config.yaml", ROOT / "secrets" / "coke" / "authentik.env", ROOT / "secrets" / "coke" / "paperless.env", ROOT / "secrets" / "coke" / "authentik-paperless.env", ROOT / "secrets" / "coke" / "monitoring.env", ROOT / "secrets" / "coke" / "authentik-grafana.env", ROOT / "secrets" / "coke" / "forgejo.env", ROOT / "secrets" / "coke" / "authentik-forgejo.env", ROOT / "secrets" / "coke" / "forgejo-runners.env", APPS / "netbird" / "config.yaml"):
         assert not forbidden.exists()
 
 
@@ -1091,3 +1092,150 @@ def test_manifest_files_listed_exist_or_are_not_yet_created():
             for u in units.split(","):
                 assert u == "netbird.service" or any(
                     (APPS / a / f"{u[:-len('.service')]}.container").exists() for a in NODES[node]), f"{node}: {u} is not deployed there"
+
+
+# ------------------------------------------------------------------ forgejo
+
+FORGEJO_HOST = "git.sapphic.world"
+FORGEJO_PUBLISH = ["100.127.197.215:3001:3000", "100.127.197.215:2222:2222"]
+FORGEJO_RUNNERS_ENV = "/var/data/secrets/forgejo-runners.env"
+
+
+def test_forgejo_routes():
+    route = load_routes(APPS / "forgejo" / "routes.yml")  # check_router/check_tcp_router run on it via the ecstasy route test
+    assert set(route) == {"http", "tcp"}
+    http, tcp = route["http"], route["tcp"]
+    assert set(http["routers"]) == {"forgejo"}
+    r = http["routers"]["forgejo"]
+    assert r["rule"] == f"Host(`{FORGEJO_HOST}`)" and r["entryPoints"] == ["websecure", "mesh"] and r["service"] == "forgejo"
+    check_router("forgejo", r)
+    assert http["services"] == {"forgejo": {"loadBalancer": {"servers": [{"url": "http://100.127.197.215:3001"}]}}}
+    assert tcp["routers"] == {"forgejo-ssh": {"rule": "HostSNI(`*`)", "entryPoints": ["gitssh"], "service": "forgejo-ssh"}}
+    assert tcp["services"] == {"forgejo-ssh": {"loadBalancer": {"servers": [{"address": "100.127.197.215:2222"}]}}}
+    # the routed address and ports are the published ones
+    assert containers("forgejo")["forgejo"]["Container"]["PublishPort"] == FORGEJO_PUBLISH
+
+
+def test_forgejo_unit():
+    q = containers("forgejo")["forgejo"]
+    c, u, s = q["Container"], q["Unit"], q["Service"]
+    assert c["Network"] == ["forgejo.network"]
+    assert "forgejo-data.volume:/var/lib/gitea" in c["Volume"]
+    assert "/etc/containers/systemd/apps/forgejo/forgejo-setup.sh:/usr/local/share/forgejo-setup.sh:ro,z" in c["Volume"]
+    assert c["EnvironmentFile"] == ["/etc/containers/systemd/apps/forgejo/settings.env", "/var/data/secrets/forgejo.env", FORGEJO_RUNNERS_ENV]
+    assert set(u["ConditionPathExists"]) == {"/var/data/secrets/forgejo.env", FORGEJO_RUNNERS_ENV}
+    assert c["Notify"] == ["healthy"]
+    assert c["HealthCmd"] == ["curl -fsS -o /dev/null http://127.0.0.1:3000/api/healthz"]
+    assert s["ExecStartPost"] == ["/usr/bin/podman exec forgejo /bin/sh /usr/local/share/forgejo-setup.sh"]
+    assert "netbird.service" in u["After"][0].split() and "netbird.service" in u["Wants"][0].split()
+    assert u["StartLimitIntervalSec"] == ["0"]
+    t = {l[0]: l[1:] for l in targets("coke")}
+    assert t["forgejo.env.sops"] == ["/var/data/secrets/forgejo.env", "0600", "root:root", "forgejo.service"]
+    assert t["authentik-forgejo.env.sops"] == ["/var/data/secrets/authentik-forgejo.env", "0600", "root:root", "authentik-worker.service"]
+    assert t["forgejo-runners.env.sops"][:3] == [FORGEJO_RUNNERS_ENV, "0600", "root:root"]
+    assert "forgejo.service" in t["forgejo-runners.env.sops"][3].split(",")
+
+
+def test_forgejo_settings():
+    env = env_file(APPS / "forgejo" / "settings.env")
+    assert env == {
+        "FORGEJO__server__DOMAIN": FORGEJO_HOST,
+        "FORGEJO__server__ROOT_URL": f"https://{FORGEJO_HOST}/",
+        "FORGEJO__server__HTTP_PORT": "3000",
+        "FORGEJO__server__START_SSH_SERVER": "true",
+        "FORGEJO__server__SSH_DOMAIN": FORGEJO_HOST,
+        "FORGEJO__server__SSH_PORT": "22",
+        "FORGEJO__server__SSH_LISTEN_PORT": "2222",
+        "FORGEJO__security__INSTALL_LOCK": "true",
+        "FORGEJO__security__REVERSE_PROXY_TRUSTED_PROXIES": "100.127.17.6/32",
+        "FORGEJO__service__DISABLE_REGISTRATION": "false",
+        "FORGEJO__service__ALLOW_ONLY_EXTERNAL_REGISTRATION": "true",
+        "FORGEJO__service__ENABLE_INTERNAL_SIGNIN": "false",
+        "FORGEJO__service__REQUIRE_SIGNIN_VIEW": "false",
+        "FORGEJO__oauth2_client__ENABLE_AUTO_REGISTRATION": "true",
+        "FORGEJO__oauth2_client__USERNAME": "preferred_username",
+        "FORGEJO__openid__ENABLE_OPENID_SIGNIN": "false",
+        "FORGEJO__openid__ENABLE_OPENID_SIGNUP": "false",
+        "FORGEJO__mailer__ENABLED": "false",
+        "FORGEJO__actions__ENABLED": "true",
+    }
+    assert not [k for k in env if re.search(r"SECRET_KEY|INTERNAL_TOKEN|CLIENT_SECRET", k)]
+
+
+def test_forgejo_blueprint():
+    doc = load_blueprint(APPS / "authentik" / "forgejo-blueprint.yaml")
+    assert doc["version"] == 1
+    provider = next(e for e in doc["entries"] if e["model"] == "authentik_providers_oauth2.oauth2provider")["attrs"]
+    app = next(e for e in doc["entries"] if e["model"] == "authentik_core.application")
+    binding = next(e for e in doc["entries"] if e["model"] == "authentik_policies.policybinding")
+    assert provider["client_type"] == "confidential" and provider["client_id"] == "forgejo"
+    assert set(provider["grant_types"]) == {"authorization_code", "refresh_token"}
+    assert isinstance(provider["client_secret"], _Tag) and provider["client_secret"].tag == "Env"
+    assert provider["client_secret"].value == "AUTHENTIK_FORGEJO_CLIENT_SECRET"
+    assert not isinstance(provider["signing_key"], str) and provider["signing_key"].tag == "Find"
+    # Forgejo's callback for the login source named `authentik`: /user/oauth2/<name>/callback, strict match
+    assert provider["redirect_uris"] == [{"matching_mode": "strict", "url": f"https://{FORGEJO_HOST}/user/oauth2/authentik/callback"}]
+    assert [m.value[1] for m in provider["property_mappings"]] == [
+        ["managed", f"goauthentik.io/providers/oauth2/scope-{s}"] for s in ("openid", "email", "profile")]
+    assert app["identifiers"] == {"slug": "forgejo"} and app["attrs"]["provider"].tag == "KeyOf"
+    assert app["attrs"]["meta_launch_url"] == f"https://{FORGEJO_HOST}"
+    assert binding["identifiers"]["target"].value == ["authentik_core.application", ["slug", "forgejo"]]
+    assert binding["attrs"]["group"].value == ["authentik_core.group", ["name", "authentik Admins"]]
+    envs = {n.value for n in walk(doc) if isinstance(n, _Tag) and n.tag == "Env"}
+    assert envs == {"AUTHENTIK_FORGEJO_CLIENT_SECRET"}
+    worker = parse_quadlet(APPS / "authentik" / "authentik-worker.container")
+    assert "/etc/containers/systemd/apps/authentik/forgejo-blueprint.yaml:/blueprints/custom/forgejo.yaml:ro,z" in worker["Container"]["Volume"]
+    assert "/var/data/secrets/authentik-forgejo.env" in worker["Container"]["EnvironmentFile"]
+    assert "/var/data/secrets/authentik-forgejo.env" in worker["Unit"]["ConditionPathExists"]
+    assert "AUTHENTIK_FORGEJO" not in (APPS / "authentik" / "authentik-server.container").read_text()
+
+
+FAKE_FORGEJO = """#!/bin/sh
+echo "$*" >> "$FAKE_DIR/calls"
+if [ "$1 $2 $3" = "admin auth list" ]; then
+  echo "ID   Name   Type   Enabled"
+  [ -e "$FAKE_DIR/exists" ] && echo "7    authentik   OAuth2   true"
+fi
+exit 0
+"""
+RUNNER_SECRETS = {f"FORGEJO_RUNNER_{n}_SECRET": c * 40 for n, c in ((1, "a"), (2, "b"), (3, "c"))}
+
+
+def run_forgejo_setup(tmp_path, env_extra=None, drop=()):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / "forgejo").write_text(FAKE_FORGEJO)
+    (bin_dir / "forgejo").chmod(0o755)
+    (tmp_path / "calls").write_text("")
+    env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "FAKE_DIR": str(tmp_path), "AUTHENTIK_FORGEJO_CLIENT_SECRET": "s3cret",
+           **RUNNER_SECRETS, **(env_extra or {})}
+    for k in drop:
+        env.pop(k)
+    r = subprocess.run(["sh", str(APPS / "forgejo" / "forgejo-setup.sh")], env=env, capture_output=True, text=True)
+    return r, (tmp_path / "calls").read_text().splitlines()
+
+
+def test_forgejo_setup_script_is_idempotent(tmp_path):
+    oauth = ("--name authentik --provider openidConnect --key forgejo --secret s3cret --auto-discover-url "
+             f"https://{AUTH_HOST}/application/o/forgejo/.well-known/openid-configuration")
+    rest = "--scopes email --scopes profile --group-claim-name groups --admin-group authentik Admins --skip-local-2fa"
+    runners = [f"forgejo-cli actions register --name coke-runner-{n} --secret {RUNNER_SECRETS[f'FORGEJO_RUNNER_{n}_SECRET']} --keep-labels"
+               for n in (1, 2, 3)]
+    r, calls = run_forgejo_setup(tmp_path)
+    assert r.returncode == 0, r.stderr
+    adds = [c for c in calls if c.startswith("admin auth add-oauth")]
+    assert len(adds) == 1 and adds[0].startswith(f"admin auth add-oauth {oauth}") and rest in adds[0]
+    assert not [c for c in calls if "update-oauth" in c]
+    assert [c for c in calls if c.startswith("forgejo-cli")] == runners
+    # second run: the source exists (id 7) and is updated in place, never added twice
+    (tmp_path / "exists").write_text("")
+    r, calls = run_forgejo_setup(tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert not [c for c in calls if "add-oauth" in c]
+    ups = [c for c in calls if c.startswith("admin auth update-oauth")]
+    assert len(ups) == 1 and ups[0].startswith(f"admin auth update-oauth --id 7 {oauth}") and rest in ups[0]
+    assert [c for c in calls if c.startswith("forgejo-cli")] == runners
+    assert "s3cret" not in r.stdout + r.stderr and RUNNER_SECRETS["FORGEJO_RUNNER_1_SECRET"] not in r.stdout + r.stderr
+    # a missing runner secret fails the start loudly
+    r, _ = run_forgejo_setup(tmp_path, drop=("FORGEJO_RUNNER_2_SECRET",))
+    assert r.returncode != 0
