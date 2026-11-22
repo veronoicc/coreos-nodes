@@ -21,6 +21,8 @@ Volume=forgejo-dind-3-certs.volume:/certs:z
 [Service]
 Restart=on-failure
 RestartSec=10
+# Capped by forgejo-ci.slice (MemoryMax=4G, rendered by build.py): all dind daemons, so all CI jobs, share 4G.
+Slice=forgejo-ci.slice
 
 [Install]
 WantedBy=multi-user.target

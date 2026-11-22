@@ -173,6 +173,27 @@ def test_non_traefik_node_has_no_nonlocal_bind():
     assert NONLOCAL_BIND not in {f["path"] for f in ign["storage"]["files"]}
 
 
+SLICE = "forgejo-ci.slice"
+
+
+def test_forgejo_node_gets_ci_slice_with_memory_cap():
+    ign = build_ign(base_config(), node=base_node(apps=["forgejo"]))
+    unit = next(u for u in ign["systemd"]["units"] if u["name"] == SLICE)
+    assert "enabled" not in unit  # slices are activated by their members
+    assert unit["contents"] == (
+        "[Unit]\n"
+        "Description=Forgejo Actions CI (docker:dind daemons); hard memory cap so CI jobs never OOM-kill other services\n"
+        "\n"
+        "[Slice]\n"
+        "MemoryMax=4G\n"
+    )
+
+
+def test_non_forgejo_node_has_no_ci_slice():
+    ign = build_ign(base_config(), node=base_node(apps=["traefik"]))
+    assert SLICE not in [u["name"] for u in ign["systemd"]["units"]]
+
+
 def test_netbird_quadlet_gated_and_secret_free(ign):
     q = ign_file(ign, "/etc/containers/systemd/netbird.container")
     lines = q.splitlines()

@@ -170,6 +170,13 @@ ExecStart=/bin/sh -c 'semodule -l | grep -qx sshd-port || semodule -i /etc/ssh/s
 WantedBy=multi-user.target
 """
 
+FORGEJO_CI_SLICE = """[Unit]
+Description=Forgejo Actions CI (docker:dind daemons); hard memory cap so CI jobs never OOM-kill other services
+
+[Slice]
+MemoryMax=4G
+"""
+
 
 def ssh_port(name, node):
     """Admin sshd port of a node (default 22)."""
@@ -450,6 +457,8 @@ def render(config, name, node, root=ROOT):
             inline_file("/etc/ssh/sshd-port.cil", f"(portcon tcp {port} (system_u object_r ssh_port_t ((s0) (s0))))\n"),
         ]
         butane["systemd"]["units"].append({"name": "sshd-port-selinux.service", "enabled": True, "contents": SSHD_PORT_UNIT})
+    if "forgejo" in node_apps(name, node, root):
+        butane["systemd"]["units"].append({"name": "forgejo-ci.slice", "contents": FORGEJO_CI_SLICE})
     return butane
 
 

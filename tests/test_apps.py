@@ -1279,6 +1279,13 @@ def test_only_dind_is_privileged(app, name, q):
     assert privileged == name.startswith("forgejo-dind-"), name
 
 
+@pytest.mark.parametrize("app,name,q", all_containers(), ids=lambda v: v if isinstance(v, str) else "")
+def test_only_dind_is_in_the_ci_slice(app, name, q):
+    """Slice rendered by build.py (forgejo-ci.slice, MemoryMax=4G); Quadlet's --cgroups=split puts the container under the unit's cgroup."""
+    slice_ = q.get("Service", {}).get("Slice")
+    assert slice_ == (["forgejo-ci.slice"] if name.startswith("forgejo-dind-") else None), name
+
+
 @pytest.mark.parametrize("n", [1, 2, 3])
 def test_forgejo_runner_pairs(n):
     cs = containers("forgejo")

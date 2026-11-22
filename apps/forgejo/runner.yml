@@ -1,7 +1,7 @@
-# Shared by forgejo-runner-1..3. runner-entry.sh fills @UUID@ and @TOKEN@ from the runner's secret and starts the daemon on the result.
+# Shared by forgejo-runner-1..N. runner-entry.sh fills @UUID@ and @TOKEN@ from the runner's secret and starts the daemon on the result.
 # Job Docker access (upstream compose example): TLS dind with shared certs, job containers on the dind host network, so
 # `localhost:2376` reaches the daemon and `localhost` is in its certificate.
-# ponytail: --memory=2g per job x3 runners can exceed coke's RAM next to Authentik/Paperless/Grafana; lower it or the runner count if coke swaps
+# ponytail: --memory=2g is per job; the sum over all jobs is capped at 4G by forgejo-ci.slice (the dind daemons), so jobs fail before they can starve Authentik/Paperless/Grafana
 log:
   level: info
 runner:

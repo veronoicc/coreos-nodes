@@ -60,7 +60,7 @@ Three instance-wide runners `coke-runner-1..3` (Forgejo Runner 13.2.2), each pai
 - Job Docker access (as in the upstream compose example): job containers run on the dind host network with `DOCKER_HOST=tcp://localhost:2376` and the client certificates mounted from
   `/certs/client`. Plain TCP is not possible (Docker >= 28 refuses it on non-localhost addresses), and the repo bans socket mounts.
 - **Trust:** a job drives a privileged daemon, so any workflow is effectively root on coke and can reach coke's LAN and the mesh. Accepted because only Authentik admins can log in.
-- Memory: three parallel jobs at 2 GB can exceed coke's RAM next to Authentik, Paperless and Grafana; lower `--memory` in `runner.yml` or remove a runner if coke swaps.
+- Memory: every dind daemon runs in `forgejo-ci.slice` (`MemoryMax=4G`), so all CI jobs together can never use more than 4 GB and cannot OOM-kill Authentik, Paperless or Grafana (a job over the cap is killed instead). The slice is rendered by `build.py` for every node with `forgejo` (a reinstall keeps it) and activated by its members; usage: `systemctl status forgejo-ci.slice`.
 - Smoke test: a repository workflow `on: [push]`, `runs-on: ubuntu-latest`, step `docker info --format '{{.ServerVersion}}'` prints `29.10.0`. Site Administration -> Actions -> Runners lists the three runners.
 
 ## Secrets (your step, recipe)
