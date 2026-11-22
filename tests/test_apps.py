@@ -1090,6 +1090,8 @@ def test_manifest_files_listed_exist_or_are_not_yet_created():
 FORGEJO_HOST = "git.sapphic.world"
 FORGEJO_PUBLISH = ["100.127.197.215:3001:3000", "100.127.197.215:2222:2222"]
 FORGEJO_RUNNERS_ENV = "/var/data/secrets/forgejo-runners.env"
+# The runner set is whatever forgejo-runner-<n>.container files exist; test_forgejo_runner_set_is_single_sourced pins everything else to it.
+RUNNERS = sorted(int(m[1]) for p in (APPS / "forgejo").glob("forgejo-runner-*.container") if (m := re.fullmatch(r"forgejo-runner-(\d+)\.container", p.name)))
 
 
 def test_forgejo_routes():
@@ -1195,7 +1197,7 @@ if [ "$1 $2 $3" = "admin auth list" ]; then
 fi
 exit 0
 """
-RUNNER_SECRETS = {f"FORGEJO_RUNNER_{n}_SECRET": c * 40 for n, c in ((1, "a"), (2, "b"), (3, "c"))}
+RUNNER_SECRETS = {f"FORGEJO_RUNNER_{n}_SECRET": f"{n:x}" * 40 for n in RUNNERS}  # 40 hex, distinct per runner (1..9, a)
 
 
 def run_forgejo_setup(tmp_path, env_extra=None, drop=()):
@@ -1229,7 +1231,7 @@ def test_forgejo_start_applies_setup_between_migrate_and_web(tmp_path):
     assert r.returncode == 0, r.stderr
     assert calls[0] == "-c /x/app.ini migrate" and calls[-1] == "-c /x/app.ini web"
     middle = calls[1:-1]
-    assert any(c.startswith("admin auth add-oauth") for c in middle) and len([c for c in middle if c.startswith("forgejo-cli")]) == 3
+    assert any(c.startswith("admin auth add-oauth") for c in middle) and len([c for c in middle if c.startswith("forgejo-cli")]) == len(RUNNERS)
     # a failing setup (missing runner secret) never reaches `web`
     env.pop("FORGEJO_RUNNER_3_SECRET")
     r, calls = run(env)
@@ -1241,7 +1243,7 @@ def test_forgejo_setup_script_is_idempotent(tmp_path):
              f"https://{AUTH_HOST}/application/o/forgejo/.well-known/openid-configuration")
     rest = "--scopes email --scopes profile --group-claim-name groups --admin-group authentik Admins --skip-local-2fa"
     runners = [f"forgejo-cli actions register --name coke-runner-{n} --secret {RUNNER_SECRETS[f'FORGEJO_RUNNER_{n}_SECRET']} --keep-labels"
-               for n in (1, 2, 3)]
+               for n in RUNNERS]
     r, calls = run_forgejo_setup(tmp_path)
     assert r.returncode == 0, r.stderr
     adds = [c for c in calls if c.startswith("admin auth add-oauth")]
@@ -1267,8 +1269,8 @@ def test_forgejo_setup_script_is_idempotent(tmp_path):
 
 def test_runner_images_pinned():
     img = {n: q["Container"]["Image"][0] for _, n, q in all_containers()}
-    runners = {img[f"forgejo-runner-{n}"] for n in (1, 2, 3)}
-    dinds = {img[f"forgejo-dind-{n}"] for n in (1, 2, 3)}
+    runners = {img[f"forgejo-runner-{n}"] for n in RUNNERS}
+    dinds = {img[f"forgejo-dind-{n}"] for n in RUNNERS}
     assert len(runners) == 1 and re.fullmatch(r"code\.forgejo\.org/forgejo/runner:\d+\.\d+\.\d+", runners.pop())
     assert len(dinds) == 1 and re.fullmatch(r"docker\.io/library/docker:\d+\.\d+\.\d+-dind", dinds.pop())
 
@@ -1286,7 +1288,7 @@ def test_only_dind_is_in_the_ci_slice(app, name, q):
     assert slice_ == (["forgejo-ci.slice"] if name.startswith("forgejo-dind-") else None), name
 
 
-@pytest.mark.parametrize("n", [1, 2, 3])
+@pytest.mark.parametrize("n", RUNNERS)
 def test_forgejo_runner_pairs(n):
     cs = containers("forgejo")
     dind, runner = cs[f"forgejo-dind-{n}"], cs[f"forgejo-runner-{n}"]
@@ -1308,7 +1310,24 @@ def test_forgejo_runner_pairs(n):
     assert "PublishPort" not in c
     line = next(l for l in targets("coke") if l[0] == "forgejo-runners.env.sops")
     assert line == ["forgejo-runners.env.sops", FORGEJO_RUNNERS_ENV, "0600", "root:root",
-                    "forgejo.service,forgejo-runner-1.service,forgejo-runner-2.service,forgejo-runner-3.service"]
+                    ",".join(["forgejo.service"] + [f"forgejo-runner-{i}.service" for i in RUNNERS])]
+    for f in (f"forgejo-dind-{n}.volume", f"forgejo-dind-{n}-certs.volume"):
+        assert (APPS / "forgejo" / f).is_file()
+
+
+def test_forgejo_runner_set_is_single_sourced():
+    """Units, Forgejo-side registration, secrets and the secrets-sync restart list must name the same runners."""
+    assert RUNNERS == list(range(1, len(RUNNERS) + 1))
+    d = APPS / "forgejo"
+    dinds = {int(m[1]) for p in d.glob("forgejo-dind-*.container") if (m := re.fullmatch(r"forgejo-dind-(\d+)\.container", p.name))}
+    assert dinds == set(RUNNERS)
+    setup = (d / "forgejo-setup.sh").read_text()
+    registered = [int(x) for x in re.search(r"(?m)^for n in ([\d ]+); do$", setup)[1].split()]
+    assert registered == RUNNERS
+    keys = [l.split("=", 1)[0] for l in (ROOT / "secrets" / "coke" / "forgejo-runners.env.sops").read_text().splitlines() if l.startswith("FORGEJO_RUNNER_")]
+    assert sorted(keys) == sorted(f"FORGEJO_RUNNER_{n}_SECRET" for n in RUNNERS)  # dotenv sops keeps key names in clear text
+    line = next(l for l in targets("coke") if l[0] == "forgejo-runners.env.sops")
+    assert set(line[4].split(",")) == {"forgejo.service"} | {f"forgejo-runner-{n}.service" for n in RUNNERS}
 
 
 def run_runner_entry(tmp_path, fails=0, drop_secret=False):

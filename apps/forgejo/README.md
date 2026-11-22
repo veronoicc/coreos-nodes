@@ -1,7 +1,7 @@
 # Forgejo (git.sapphic.world)
 
 Forgejo 17 (rootless image, SQLite) on **coke** (`apps: [..., forgejo]` in `nodes/coke.yml`), public at `https://git.sapphic.world`, with git over SSH on port 22.
-Login only through Authentik (`auth.sapphic.world`, OIDC), only members of the group `authentik Admins`. Three instance-wide Actions runners with
+Login only through Authentik (`auth.sapphic.world`, OIDC), only members of the group `authentik Admins`. Ten instance-wide Actions runners with
 docker:dind run next to it (see Runners). Declarative: Quadlets and settings via `apps-sync`, secrets via `secrets-sync`. Generic mechanics: root [README](../../README.md).
 
 ## Topology
@@ -24,11 +24,11 @@ git ----22-----> ecstasy: Traefik `gitssh` (plain TCP, public + mesh IP)        
 | `forgejo.container` | `codeberg.org/forgejo/forgejo:17.0.2-rootless`, HTTP `3001` and SSH `2222` on the mesh address. |
 | `settings.env` | Non-secret settings as `FORGEJO__<section>__<KEY>` (environment-to-ini writes them to `app.ini` at every start; removing a line does not remove it from `app.ini`). |
 | `forgejo-start.sh` | Container command: migrate, then `forgejo-setup.sh`, then `web`. Any failure aborts before `web` and the unit is retried. |
-| `forgejo-setup.sh` | Before every `web` start: creates or updates (never duplicates) the Authentik login source and registers the three runners. Fails if a secret is missing. |
+| `forgejo-setup.sh` | Before every `web` start: creates or updates (never duplicates) the Authentik login source and registers the ten runners. Fails if a secret is missing. |
 | `routes.yml` | The HTTP router and the `gitssh` TCP router. |
 | `forgejo.network`, `forgejo-data.volume` | Network and persistent volume (`/var/lib/gitea`: `app.ini` with generated INTERNAL_TOKEN/JWT secrets, database, repositories, SSH host keys). |
 | `/var/data/secrets/forgejo.env` | secrets-sync, 0600 root: `FORGEJO__security__SECRET_KEY`, `AUTHENTIK_FORGEJO_CLIENT_SECRET`. |
-| `/var/data/secrets/forgejo-runners.env` | secrets-sync, 0600 root: `FORGEJO_RUNNER_{1,2,3}_SECRET` (40 hex each), read by Forgejo and by the runners. |
+| `/var/data/secrets/forgejo-runners.env` | secrets-sync, 0600 root: `FORGEJO_RUNNER_{1..10}_SECRET` (40 hex each), read by Forgejo and by the runners. |
 | `/var/data/secrets/authentik-forgejo.env` | secrets-sync, 0600 root: `AUTHENTIK_FORGEJO_CLIENT_SECRET`, read by the Authentik worker's blueprint only. |
 
 ## Login: only Authentik admins, first login becomes site admin
@@ -44,7 +44,7 @@ git ----22-----> ecstasy: Traefik `gitssh` (plain TCP, public + mesh IP)        
 
 ## Runners
 
-Three instance-wide runners `coke-runner-1..3` (Forgejo Runner 13.2.2), each paired with its own docker:dind daemon (`docker:29.10.0-dind`). Both sit on `forgejo-runners.network`; nothing is published.
+Ten instance-wide runners `coke-runner-1..10` (Forgejo Runner 13.2.2), each paired with its own docker:dind daemon (`docker:29.10.0-dind`). Both sit on `forgejo-runners.network`; nothing is published.
 
 | File | Content |
 |---|---|
@@ -61,7 +61,9 @@ Three instance-wide runners `coke-runner-1..3` (Forgejo Runner 13.2.2), each pai
   `/certs/client`. Plain TCP is not possible (Docker >= 28 refuses it on non-localhost addresses), and the repo bans socket mounts.
 - **Trust:** a job drives a privileged daemon, so any workflow is effectively root on coke and can reach coke's LAN and the mesh. Accepted because only Authentik admins can log in.
 - Memory: every dind daemon runs in `forgejo-ci.slice` (`MemoryMax=4G`), so all CI jobs together can never use more than 4 GB and cannot OOM-kill Authentik, Paperless or Grafana (a job over the cap is killed instead). The slice is rendered by `build.py` for every node with `forgejo` (a reinstall keeps it) and activated by its members; usage: `systemctl status forgejo-ci.slice`.
-- Smoke test: a repository workflow `on: [push]`, `runs-on: ubuntu-latest`, step `docker info --format '{{.ServerVersion}}'` prints `29.10.0`. Site Administration -> Actions -> Runners lists the three runners.
+- RAM and disk: an idle runner + dind pair needs about 65 MB; a job is capped at 2 GB (`runner.yml`) and all jobs together at 4 GB (the slice). Each dind keeps its own image cache in `forgejo-dind-<n>` on `/var/lib/containers`, i.e. the data disk, so ten runners can hold ten copies of the same images.
+- Adding or removing a runner: add/remove its four files (`forgejo-runner-<n>.container`, `forgejo-dind-<n>.container`, the two `.volume`s), the `FORGEJO_RUNNER_<n>_SECRET` key, the number in the `for n in ...` line of `forgejo-setup.sh` and the unit in the `forgejo-runners.env.sops` line of `secrets/coke/targets.conf`; a test fails until all five agree.
+- Smoke test: a repository workflow `on: [push]`, `runs-on: ubuntu-latest`, step `docker info --format '{{.ServerVersion}}'` prints `29.10.0`. Site Administration -> Actions -> Runners lists the ten runners.
 
 ## Secrets (your step, recipe)
 
@@ -73,7 +75,7 @@ The OIDC client secret exists in two encrypted files, byte-identical (`forgejo.e
 python3 - <<'EOF'
 import secrets, subprocess
 oauth, key = secrets.token_urlsafe(48), secrets.token_hex(32)
-runners = [secrets.token_hex(20) for _ in range(3)]  # 40 hex: the runner uuid is derived from its first 16 characters
+runners = [secrets.token_hex(20) for _ in range(10)]  # 40 hex: the runner uuid is derived from its first 16 characters
 def enc(path, text):
     subprocess.run(["sops", "encrypt", "--filename-override", path, "--input-type", "dotenv", "--output-type", "dotenv",
                     "--output", path, "/dev/stdin"], input=text.encode(), check=True)

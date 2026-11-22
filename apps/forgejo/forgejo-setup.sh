@@ -20,7 +20,7 @@ fi
 
 # Offline runner registration: Forgejo stores the runner for the shared secret (idempotent, DB access only). The runner side
 # derives its uuid from the same secret (runner-entry.sh).
-for n in 1 2 3; do
+for n in 1 2 3 4 5 6 7 8 9 10; do
   eval "secret=\${FORGEJO_RUNNER_${n}_SECRET}"
   forgejo forgejo-cli actions register --name "coke-runner-$n" --secret "$secret" --keep-labels >/dev/null
 done

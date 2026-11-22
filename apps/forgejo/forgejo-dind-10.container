@@ -1,0 +1,28 @@
+[Unit]
+Description=Docker-in-Docker for forgejo-runner-10 (privileged; workflow jobs run here)
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/var/data
+
+[Container]
+Image=docker.io/library/docker:29.10.0-dind
+ContainerName=forgejo-dind-10
+# The hostname is the TLS certificate SAN the runner connects to (DOCKER_HOST=tcp://forgejo-dind-10:2376).
+HostName=forgejo-dind-10
+Network=forgejo-runners.network
+# dind needs --privileged. Workflow jobs get this daemon, so any workflow is effectively root on coke; only Authentik admins
+# can log in to Forgejo. This is the only privileged container in the repo (a test enforces it).
+PodmanArgs=--privileged
+# TLS on 2376 with a generated CA; the client certificates land in /certs/client, which the runner mounts read-only.
+Environment=DOCKER_TLS_CERTDIR=/certs
+Volume=forgejo-dind-10.volume:/var/lib/docker
+Volume=forgejo-dind-10-certs.volume:/certs:z
+
+[Service]
+Restart=on-failure
+RestartSec=10
+# Capped by forgejo-ci.slice (MemoryMax=4G, rendered by build.py): all dind daemons, so all CI jobs, share 4G.
+Slice=forgejo-ci.slice
+
+[Install]
+WantedBy=multi-user.target

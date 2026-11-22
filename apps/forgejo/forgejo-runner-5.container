@@ -1,0 +1,35 @@
+[Unit]
+Description=Forgejo Actions runner 5 (instance-wide; jobs in forgejo-dind-5)
+Wants=network-online.target
+After=network-online.target forgejo-dind-5.service
+Requires=forgejo-dind-5.service
+RequiresMountsFor=/var/data
+# /var/data/secrets/forgejo-runners.env is rendered by secrets-sync (secrets/coke/forgejo-runners.env.sops); until then the unit
+# is skipped instead of crash-looping, and secrets-sync restarts it when it appears or changes.
+ConditionPathExists=/var/data/secrets/forgejo-runners.env
+StartLimitIntervalSec=0
+
+[Container]
+Image=code.forgejo.org/forgejo/runner:13.2.2
+ContainerName=forgejo-runner-5
+Network=forgejo-runners.network
+Environment=RUNNER_INDEX=5
+# The runner itself talks to its own dind daemon over TLS (the jobs use localhost:2376, see runner.yml).
+Environment=DOCKER_HOST=tcp://forgejo-dind-5:2376
+Environment=DOCKER_TLS_VERIFY=1
+Environment=DOCKER_CERT_PATH=/certs/client
+# FORGEJO_RUNNER_5_SECRET (and the others, unused here): runner-entry.sh derives uuid and token from it. Forgejo registers the same
+# secret as `coke-runner-5` (apps/forgejo/forgejo-setup.sh). Read by podman, not systemd (SELinux).
+EnvironmentFile=/var/data/secrets/forgejo-runners.env
+Volume=forgejo-dind-5-certs.volume:/certs:ro,z
+Volume=/etc/containers/systemd/apps/forgejo/runner.yml:/etc/forgejo-runner/runner.yml:ro,z
+Volume=/etc/containers/systemd/apps/forgejo/runner-entry.sh:/etc/forgejo-runner/entry.sh:ro,z
+Exec=/bin/sh /etc/forgejo-runner/entry.sh /etc/forgejo-runner/runner.yml
+
+[Service]
+# A retry covers forgejo-dind-5 still generating its certificates, or Forgejo not being reachable yet.
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
