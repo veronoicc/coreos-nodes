@@ -1,7 +1,7 @@
 #!/bin/sh
-# Runs inside the forgejo container after it is healthy (ExecStartPost of forgejo.service). Idempotent: every restart updates the
-# Authentik login source in place and re-registers the runners. Secrets come from the container environment; a missing one
-# aborts (set -u) and fails the start loudly.
+# Run by forgejo-start.sh inside the container after `forgejo migrate` and BEFORE `forgejo web` (login sources are read at web
+# startup). Idempotent: every start updates the Authentik login source in place and re-registers the runners. Secrets come from
+# the container environment; a missing one aborts (set -u) and fails the start loudly.
 set -eu
 
 oauth() {

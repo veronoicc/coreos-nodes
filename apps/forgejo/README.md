@@ -16,13 +16,14 @@ git ----22-----> ecstasy: Traefik `gitssh` (plain TCP, public + mesh IP)        
 - Port 22 of ecstasy belongs to Traefik; ecstasy's own admin sshd listens on 2200 (`ssh_port` in `nodes/ecstasy.yml`, see the root README).
 - Git SSH URL: `git@git.sapphic.world:<user>/<repo>.git` (`SSH_DOMAIN=git.sapphic.world`, `SSH_PORT=22`). Forgejo's SSH server listens on 2222 inside the container.
 - Volume `forgejo-data` is `# apps-sync: keep` (`apps-sync reset forgejo` keeps it, only `reset --include-persistent forgejo` wipes it).
-- The unit is gated on `/var/data/secrets/forgejo.env` and `forgejo-runners.env` (`ConditionPathExists`), `Notify=healthy`, and `ExecStartPost` runs `forgejo-setup.sh` inside the container.
+- The unit is gated on `/var/data/secrets/forgejo.env` and `forgejo-runners.env` (`ConditionPathExists`) and `Notify=healthy`. Its command is `forgejo-start.sh`: after the image entrypoint rendered `app.ini`, it runs `forgejo migrate`, then `forgejo-setup.sh`, then `exec forgejo web`. The order matters: Forgejo loads login sources into memory when `web` starts, so a setup run afterwards would only become live after a second restart.
 
 | File | Content |
 |---|---|
 | `forgejo.container` | `codeberg.org/forgejo/forgejo:17.0.2-rootless`, HTTP `3001` and SSH `2222` on the mesh address. |
 | `settings.env` | Non-secret settings as `FORGEJO__<section>__<KEY>` (environment-to-ini writes them to `app.ini` at every start; removing a line does not remove it from `app.ini`). |
-| `forgejo-setup.sh` | After every start: creates or updates (never duplicates) the Authentik login source and registers the three runners. Fails if a secret is missing. |
+| `forgejo-start.sh` | Container command: migrate, then `forgejo-setup.sh`, then `web`. Any failure aborts before `web` and the unit is retried. |
+| `forgejo-setup.sh` | Before every `web` start: creates or updates (never duplicates) the Authentik login source and registers the three runners. Fails if a secret is missing. |
 | `routes.yml` | The HTTP router and the `gitssh` TCP router. |
 | `forgejo.network`, `forgejo-data.volume` | Network and persistent volume (`/var/lib/gitea`: `app.ini` with generated INTERNAL_TOKEN/JWT secrets, database, repositories, SSH host keys). |
 | `/var/data/secrets/forgejo.env` | secrets-sync, 0600 root: `FORGEJO__security__SECRET_KEY`, `AUTHENTIK_FORGEJO_CLIENT_SECRET`. |
@@ -95,6 +96,6 @@ Bump the tag in `forgejo.container` and push; `apps-sync` restarts only the chan
 
 - coke rebooted: `forgejo` waits for the mesh interface and retries every 10 s (`StartLimitIntervalSec=0`).
 - Both secret files missing: the unit is skipped (`ConditionResult=no`); `journalctl -u secrets-sync` tells why.
-- `forgejo-setup.sh` fails (`ExecStartPost`): the start fails and is retried; `journalctl -u forgejo` shows which command (a missing runner secret aborts at the first use).
+- `forgejo-setup.sh` fails (run by `forgejo-start.sh`): `web` never starts, the unit is retried; `journalctl -u forgejo` shows which command (a missing runner secret aborts at the first use).
 - Git SSH hangs or answers `SSH-2.0-OpenSSH`: Traefik's `gitssh` entrypoint is not live or ecstasy's sshd still binds port 22.
 - Permission errors on `/var/lib/gitea` at the first start: append `:U` to the `forgejo-data.volume` mount (chown to uid 1000).

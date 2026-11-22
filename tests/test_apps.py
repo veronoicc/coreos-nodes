@@ -1122,11 +1122,13 @@ def test_forgejo_unit():
     assert c["Network"] == ["forgejo.network"]
     assert "forgejo-data.volume:/var/lib/gitea" in c["Volume"]
     assert "/etc/containers/systemd/apps/forgejo/forgejo-setup.sh:/usr/local/share/forgejo-setup.sh:ro,z" in c["Volume"]
+    assert "/etc/containers/systemd/apps/forgejo/forgejo-start.sh:/usr/local/share/forgejo-start.sh:ro,z" in c["Volume"]
     assert c["EnvironmentFile"] == ["/etc/containers/systemd/apps/forgejo/settings.env", "/var/data/secrets/forgejo.env", FORGEJO_RUNNERS_ENV]
     assert set(u["ConditionPathExists"]) == {"/var/data/secrets/forgejo.env", FORGEJO_RUNNERS_ENV}
     assert c["Notify"] == ["healthy"]
     assert c["HealthCmd"] == ["curl -fsS -o /dev/null http://127.0.0.1:3000/api/healthz"]
-    assert s["ExecStartPost"] == ["/usr/bin/podman exec forgejo /bin/sh /usr/local/share/forgejo-setup.sh"]
+    # login sources are loaded when `web` starts: setup runs inside the container command, never as ExecStartPost
+    assert "ExecStartPost" not in s and c["Exec"] == ["/bin/sh /usr/local/share/forgejo-start.sh"]
     assert "netbird.service" in u["After"][0].split() and "netbird.service" in u["Wants"][0].split()
     assert u["StartLimitIntervalSec"] == ["0"]
     t = {l[0]: l[1:] for l in targets("coke")}
@@ -1213,6 +1215,30 @@ def run_forgejo_setup(tmp_path, env_extra=None, drop=()):
         env.pop(k)
     r = subprocess.run(["sh", str(APPS / "forgejo" / "forgejo-setup.sh")], env=env, capture_output=True, text=True)
     return r, (tmp_path / "calls").read_text().splitlines()
+
+
+def test_forgejo_start_applies_setup_between_migrate_and_web(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "forgejo").write_text(FAKE_FORGEJO)
+    (bin_dir / "forgejo").chmod(0o755)
+    for f in ("forgejo-start.sh", "forgejo-setup.sh"):
+        (tmp_path / f).write_text((APPS / "forgejo" / f).read_text())
+    env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "FAKE_DIR": str(tmp_path), "GITEA_APP_INI": "/x/app.ini",
+           "AUTHENTIK_FORGEJO_CLIENT_SECRET": "s3cret", **RUNNER_SECRETS}
+    def run(e):
+        (tmp_path / "calls").write_text("")
+        r = subprocess.run(["sh", str(tmp_path / "forgejo-start.sh")], env=e, capture_output=True, text=True)
+        return r, (tmp_path / "calls").read_text().splitlines()
+    r, calls = run(env)
+    assert r.returncode == 0, r.stderr
+    assert calls[0] == "-c /x/app.ini migrate" and calls[-1] == "-c /x/app.ini web"
+    middle = calls[1:-1]
+    assert any(c.startswith("admin auth add-oauth") for c in middle) and len([c for c in middle if c.startswith("forgejo-cli")]) == 3
+    # a failing setup (missing runner secret) never reaches `web`
+    env.pop("FORGEJO_RUNNER_3_SECRET")
+    r, calls = run(env)
+    assert r.returncode != 0 and not any(c.endswith(" web") for c in calls)
 
 
 def test_forgejo_setup_script_is_idempotent(tmp_path):

@@ -29,16 +29,18 @@ EnvironmentFile=/var/data/secrets/forgejo.env
 EnvironmentFile=/var/data/secrets/forgejo-runners.env
 Volume=forgejo-data.volume:/var/lib/gitea
 Volume=/etc/containers/systemd/apps/forgejo/forgejo-setup.sh:/usr/local/share/forgejo-setup.sh:ro,z
+Volume=/etc/containers/systemd/apps/forgejo/forgejo-start.sh:/usr/local/share/forgejo-start.sh:ro,z
+# Replaces the image's default command (`forgejo web`); the entrypoint still renders app.ini first. The wrapper migrates, applies
+# forgejo-setup.sh (login source, runners) and only then starts `web`: Forgejo reads login sources at startup.
+Exec=/bin/sh /usr/local/share/forgejo-start.sh
 HealthCmd=curl -fsS -o /dev/null http://127.0.0.1:3000/api/healthz
 HealthInterval=10s
 HealthStartPeriod=60s
 HealthRetries=5
-# systemd considers the unit started once healthy, so ExecStartPost runs against a working database.
+# systemd considers the unit started once Forgejo answers, i.e. after the setup ran and `web` is up.
 Notify=healthy
 
 [Service]
-# Idempotent login source + runner registration, on every start (see forgejo-setup.sh).
-ExecStartPost=/usr/bin/podman exec forgejo /bin/sh /usr/local/share/forgejo-setup.sh
 TimeoutStartSec=600
 Restart=on-failure
 RestartSec=10
