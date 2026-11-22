@@ -1,0 +1,5 @@
+# apps-sync: keep
+# Docker data root of forgejo-dind-3: image and build cache of the workflow jobs.
+# Persistent: `apps-sync reset forgejo` keeps it, only `apps-sync reset --include-persistent forgejo` removes it.
+[Volume]
+VolumeName=forgejo-dind-3

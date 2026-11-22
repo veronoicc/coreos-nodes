@@ -1239,3 +1239,75 @@ def test_forgejo_setup_script_is_idempotent(tmp_path):
     # a missing runner secret fails the start loudly
     r, _ = run_forgejo_setup(tmp_path, drop=("FORGEJO_RUNNER_2_SECRET",))
     assert r.returncode != 0
+
+
+# ------------------------------------------------------------------ forgejo runners
+
+
+def test_runner_images_pinned():
+    img = {n: q["Container"]["Image"][0] for _, n, q in all_containers()}
+    runners = {img[f"forgejo-runner-{n}"] for n in (1, 2, 3)}
+    dinds = {img[f"forgejo-dind-{n}"] for n in (1, 2, 3)}
+    assert len(runners) == 1 and re.fullmatch(r"code\.forgejo\.org/forgejo/runner:\d+\.\d+\.\d+", runners.pop())
+    assert len(dinds) == 1 and re.fullmatch(r"docker\.io/library/docker:\d+\.\d+\.\d+-dind", dinds.pop())
+
+
+@pytest.mark.parametrize("app,name,q", all_containers(), ids=lambda v: v if isinstance(v, str) else "")
+def test_only_dind_is_privileged(app, name, q):
+    privileged = "--privileged" in " ".join(q["Container"].get("PodmanArgs", []))
+    assert privileged == name.startswith("forgejo-dind-"), name
+
+
+@pytest.mark.parametrize("n", [1, 2, 3])
+def test_forgejo_runner_pairs(n):
+    cs = containers("forgejo")
+    dind, runner = cs[f"forgejo-dind-{n}"], cs[f"forgejo-runner-{n}"]
+    d = dind["Container"]
+    assert d["HostName"] == [f"forgejo-dind-{n}"] and d["Network"] == ["forgejo-runners.network"]
+    assert "DOCKER_TLS_CERTDIR=/certs" in d["Environment"]
+    assert f"forgejo-dind-{n}.volume:/var/lib/docker" in d["Volume"] and f"forgejo-dind-{n}-certs.volume:/certs:z" in d["Volume"]
+    assert "PublishPort" not in d
+    c, u = runner["Container"], runner["Unit"]
+    assert f"forgejo-dind-{n}.service" in u["Requires"][0].split() and f"forgejo-dind-{n}.service" in u["After"][0].split()
+    assert sorted(c["Environment"]) == sorted([f"RUNNER_INDEX={n}", f"DOCKER_HOST=tcp://forgejo-dind-{n}:2376", "DOCKER_TLS_VERIFY=1",
+                                               "DOCKER_CERT_PATH=/certs/client"])
+    assert c["EnvironmentFile"] == [FORGEJO_RUNNERS_ENV] and u["ConditionPathExists"] == [FORGEJO_RUNNERS_ENV]
+    assert sorted(c["Volume"]) == sorted([
+        f"forgejo-dind-{n}-certs.volume:/certs:ro,z",
+        "/etc/containers/systemd/apps/forgejo/runner.yml:/etc/forgejo-runner/runner.yml:ro,z",
+        "/etc/containers/systemd/apps/forgejo/runner-entry.sh:/etc/forgejo-runner/entry.sh:ro,z"])
+    assert c["Exec"] == ["/bin/sh /etc/forgejo-runner/entry.sh /etc/forgejo-runner/runner.yml"]
+    assert "PublishPort" not in c
+    line = next(l for l in targets("coke") if l[0] == "forgejo-runners.env.sops")
+    assert line == ["forgejo-runners.env.sops", FORGEJO_RUNNERS_ENV, "0600", "root:root",
+                    "forgejo.service,forgejo-runner-1.service,forgejo-runner-2.service,forgejo-runner-3.service"]
+
+
+def test_forgejo_runner_entry_renders_connection(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "forgejo-runner").write_text('#!/bin/sh\necho "$*"\ncat "$2"\n')
+    (bin_dir / "forgejo-runner").chmod(0o755)
+    secret = "7c31591e8b67225a116d4a4519ea8e507e08f71f"  # the Forgejo offline-registration docs example
+    env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "TMPDIR": str(tmp_path), "RUNNER_INDEX": "2", "FORGEJO_RUNNER_2_SECRET": secret}
+    cmd = ["sh", str(APPS / "forgejo" / "runner-entry.sh"), str(APPS / "forgejo" / "runner.yml")]
+    r = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines()[0] == f"--config {tmp_path}/runner.yml daemon"
+    assert 'uuid: "37633331-3539-3165-3862-363732323561"' in r.stdout and f'token: "{secret}"' in r.stdout
+    assert "@UUID@" not in r.stdout and "@TOKEN@" not in r.stdout
+    cfg = yaml.safe_load((tmp_path / "runner.yml").read_text())
+    assert cfg["server"]["connections"]["forgejo"]["url"] == f"https://{FORGEJO_HOST}/"
+    del env["FORGEJO_RUNNER_2_SECRET"]
+    assert subprocess.run(cmd, env=env, capture_output=True, text=True).returncode != 0
+
+
+def test_forgejo_runner_config():
+    cfg = yaml.safe_load((APPS / "forgejo" / "runner.yml").read_text())
+    r, c = cfg["runner"], cfg["container"]
+    assert r["capacity"] == 1
+    assert r["labels"] == ["ubuntu-latest:docker://ghcr.io/catthehacker/ubuntu:act-24.04", "ubuntu-24.04:docker://ghcr.io/catthehacker/ubuntu:act-24.04",
+                           "docker:docker://docker.io/library/node:22-bookworm"]
+    assert r["envs"] == {"DOCKER_HOST": "tcp://localhost:2376", "DOCKER_TLS_VERIFY": "1", "DOCKER_CERT_PATH": "/certs/client"}
+    assert c["network"] == "host" and c["privileged"] is False and c["docker_host"] == "-" and c["valid_volumes"] == ["/certs/client"]
+    assert c["options"] == "-v /certs/client:/certs/client:ro --memory=2g --cpus=2"

@@ -42,8 +42,24 @@ git ----22-----> ecstasy: Traefik `gitssh` (plain TCP, public + mesh IP)        
 
 ## Runners
 
-See the section below once Task "runners" is deployed: three instance-wide runners `coke-runner-1..3`, each with its own privileged docker:dind daemon (only dind is privileged).
-A job runs as root inside that dind, so any workflow is effectively root on coke; that is acceptable only because just Authentik admins can log in.
+Three instance-wide runners `coke-runner-1..3` (Forgejo Runner 13.2.2), each paired with its own docker:dind daemon (`docker:29.10.0-dind`). Both sit on `forgejo-runners.network`; nothing is published.
+
+| File | Content |
+|---|---|
+| `forgejo-runner-<n>.container` | Gated on `forgejo-runners.env`, `Requires=` its dind. Starts `runner-entry.sh` with `runner.yml`; retried until dind has generated its certificates. |
+| `forgejo-dind-<n>.container` | The **only privileged container** of the repo (a test enforces it). TLS on `2376`, hostname `forgejo-dind-<n>` is the certificate SAN. |
+| `forgejo-dind-<n>.volume`, `forgejo-dind-<n>-certs.volume` | Docker data root and the generated certificates (persistent). |
+| `runner.yml` | Shared config: capacity 1, labels `ubuntu-latest`/`ubuntu-24.04` (`ghcr.io/catthehacker/ubuntu:act-24.04`) and `docker` (`node:22-bookworm`), jobs capped at 2 CPUs / 2 GB. |
+| `runner-entry.sh` | Renders `uuid`/`token` into the config and execs `forgejo-runner daemon`. |
+
+- Registration is declarative, no token is ever created by hand: the shared 40-hex secret `FORGEJO_RUNNER_<n>_SECRET` is registered Forgejo-side by `forgejo-setup.sh`
+  (`forgejo forgejo-cli actions register --name coke-runner-<n> --secret ... --keep-labels`) and used runner-side by `runner-entry.sh`: the token is the secret, the uuid is its first 16
+  characters as bytes (a test pins this against the Forgejo docs example). If a runner is rejected, compare the rendered `uuid:` with the output of the register command.
+- Job Docker access (as in the upstream compose example): job containers run on the dind host network with `DOCKER_HOST=tcp://localhost:2376` and the client certificates mounted from
+  `/certs/client`. Plain TCP is not possible (Docker >= 28 refuses it on non-localhost addresses), and the repo bans socket mounts.
+- **Trust:** a job drives a privileged daemon, so any workflow is effectively root on coke and can reach coke's LAN and the mesh. Accepted because only Authentik admins can log in.
+- Memory: three parallel jobs at 2 GB can exceed coke's RAM next to Authentik, Paperless and Grafana; lower `--memory` in `runner.yml` or remove a runner if coke swaps.
+- Smoke test: a repository workflow `on: [push]`, `runs-on: ubuntu-latest`, step `docker info --format '{{.ServerVersion}}'` prints `29.10.0`. Site Administration -> Actions -> Runners lists the three runners.
 
 ## Secrets (your step, recipe)
 
