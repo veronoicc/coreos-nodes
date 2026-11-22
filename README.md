@@ -315,26 +315,28 @@ same daemon-reload and restart. Check: `netbird status` on the node shows `Lazy 
 
 ## Domain scheme
 
-One domain for services, `<x>.service.veronoi.cc`, with **split DNS**: the same name resolves to a different Traefik entrypoint depending on
-who asks. No extra component, only DNS records and Traefik `entryPoints`.
+Two service zones, `<x>.service.veronoi.cc` and `<x>.sapphic.world`, each with **split DNS**: the same name resolves to a different Traefik entrypoint
+depending on who asks. No extra component, only DNS records and Traefik `entryPoints`. Every rule below holds per zone.
 
-| Who asks | Resolves `*.service.veronoi.cc` to | Traefik entrypoint | Sees |
+| Who asks | Resolves `*.<zone>` to | Traefik entrypoint | Sees |
 |---|---|---|---|
 | internet, and any device without NetBird DNS (the nodes themselves, peers with DNS management disabled) | `176.65.149.212` (Cloudflare wildcard) | `websecure` | only the public part of a service |
 | NetBird mesh peer with NetBird DNS | `100.127.17.6` (NetBird custom zone wildcard) | `mesh` | the full service |
 
-**DNS records** (both wildcards, so a new service needs no DNS step):
+**DNS records** (per zone, both wildcards, so a new service needs no DNS step):
 
 | Where | Record | Value |
 |---|---|---|
 | Cloudflare (zone `veronoi.cc`, grey cloud, no AAAA) | `A *.service` | `176.65.149.212` |
-| Cloudflare | delete `A`/`CNAME` `netbird` and `auth` | no longer used: both hosts are under `*.service` |
+| Cloudflare (zone `sapphic.world`, grey cloud, no AAAA) | `A *` | `176.65.149.212` |
+| Cloudflare | delete `A`/`CNAME` `netbird` and `auth` in `veronoi.cc` | no longer used: both hosts moved |
 | NetBird dashboard, DNS -> Zones: custom zone `service.veronoi.cc` | `A *` | `100.127.17.6` |
+| NetBird dashboard, DNS -> Zones: custom zone `sapphic.world` | `A *` | `100.127.17.6` |
 
-The NetBird zone only overrides names inside `service.veronoi.cc`; every other name keeps its public answer. The former
+The NetBird zones only override names inside `service.veronoi.cc` and `sapphic.world`; every other name keeps its public answer. The former
 `*.internal.veronoi.cc` zone is dropped: **delete the Cloudflare record `A *.internal`** (it no longer maps to any router).
 
-**Three router shapes** for a service host (certificate always the wildcard `*.service.veronoi.cc`, `letsencrypt-dns`):
+**Three router shapes** for a service host (certificate always the wildcard of the host's own zone, `*.service.veronoi.cc` or `*.sapphic.world`, `letsencrypt-dns`; one router never spans two zones):
 
 | Shape | `entryPoints` | Meaning |
 |---|---|---|
@@ -355,13 +357,13 @@ no change to the Traefik node's `apps:`.
 - **Private by default:** `mesh` is Traefik's default entrypoint (`asdefault`), so a router without `entryPoints` is private, never public.
   A test (`tests/test_apps.py`, `check_router`, `check_mesh_coverage`) fails on any router without an explicit `entryPoints` list, on `[websecure]`
   without a path restriction, on a service host without a full mesh router, on deeper subdomains (the wildcard covers one label) and on any
-  other host than `<x>.service.veronoi.cc`.
+  other host than `<x>.service.veronoi.cc` / `<x>.sapphic.world` (or a router whose hosts span two zones, or whose wildcard is the other zone's).
 - **Name resolution:** a mesh peer gets the mesh IP only if it uses NetBird DNS. The NetBird client on the nodes runs in a container and does not
   configure systemd-resolved, so the nodes (and peers with DNS management disabled) get the public answer and reach only the public part.
   The mesh IP is only reachable with the NetBird client running.
-- **Certificate:** one wildcard from Let's Encrypt via DNS-01 (Cloudflare), resolver `letsencrypt-dns`. Only the wildcard shows up in
-  Certificate Transparency logs, never an individual service name. The Cloudflare token is sensitive: scope it to Zone `veronoi.cc`,
-  permission Zone:DNS:Edit only (steps: [`apps/traefik/README.md`](apps/traefik/README.md)).
+- **Certificate:** one wildcard per zone from Let's Encrypt via DNS-01 (Cloudflare), resolver `letsencrypt-dns`. Only the wildcards show up in
+  Certificate Transparency logs, never an individual service name. The Cloudflare token is sensitive: scope it to Zones `veronoi.cc` and
+  `sapphic.world`, permission Zone:DNS:Edit only (steps: [`apps/traefik/README.md`](apps/traefik/README.md)).
 - **No exceptions:** NetBird and Authentik live at `netbird.service.veronoi.cc` / `auth.service.veronoi.cc`, fully public (`[websecure, mesh]`) like any other service host.
   NetBird peers resolve the management name past the NetBird zone (the client caches the address it connected with), so a peer keeps reaching
   the server even though the zone answers the same name with the mesh IP.
@@ -369,8 +371,8 @@ no change to the Traefik node's `apps:`.
 - **Availability:** Traefik's mesh listener needs `wt0`, so the unit is ordered after `netbird.service` and retried (like `authentik-server`);
   otherwise a reboot could leave Traefik down, public routes included.
 
-**Add a service:** in the app's `routes.yml` add a router with `rule: Host(`<x>.service.veronoi.cc`)`, `entryPoints: [mesh]` (or `[websecure, mesh]`
-for fully public), `tls: {certResolver: letsencrypt-dns, domains: [{main: "*.service.veronoi.cc"}]}`. To expose only some paths publicly, keep the
+**Add a service:** in the app's `routes.yml` add a router with `rule: Host(`<x>.service.veronoi.cc`)` (or `<x>.sapphic.world`), `entryPoints: [mesh]` (or `[websecure, mesh]`
+for fully public), `tls: {certResolver: letsencrypt-dns, domains: [{main: "*.service.veronoi.cc"}]}` (that zone's wildcard). To expose only some paths publicly, keep the
 `[mesh]` router and add a second one with `&& PathPrefix(`/p/`)` on `[websecure]`. No DNS step: the wildcards cover it. A test rejects other hosts,
 resolvers, missing `entryPoints` and the shapes above that do not hold.
 

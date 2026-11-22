@@ -190,7 +190,8 @@ def traefik_flags():
 
 
 PUBLIC_IP, MESH_IP = "176.65.149.212", "100.127.17.6"  # ecstasy: ens18 and wt0 (the NetBird mesh address of the peer)
-SERVICE_ZONE = "service.veronoi.cc"  # Cloudflare wildcard -> public IP; NetBird zone wildcard -> mesh IP for mesh peers
+ZONES = ("service.veronoi.cc", "sapphic.world")  # each: Cloudflare wildcard -> PUBLIC_IP; NetBird custom zone `A *` -> MESH_IP
+AUTH_HOST, NB_HOST = "auth.sapphic.world", "mesh.sapphic.world"
 
 
 def test_traefik_static_config():
@@ -247,49 +248,62 @@ def test_traefik_network_unit():
 PATH_RESTRICTION = re.compile(r"\bPath(Prefix)?\(")
 
 
+def _tls(zone):
+    return {"certResolver": "letsencrypt-dns", "domains": [{"main": f"*.{zone}"}]}
+
+
+def zone_of(host):
+    """The zone whose wildcard certificate covers `host` (exactly one label below it), else None."""
+    return next((z for z in ZONES if host.endswith("." + z) and "." not in host[: -len(z) - 1]), None)
+
+
 def check_router(name, r):
     """The domain scheme (README.md, Domain scheme). Every router names its entry points: `mesh` is Traefik's default, so a
-    forgotten entryPoints would still be private, but an explicit list is what a reviewer can read. `<x>.service` hosts
-    are `[mesh]` (mesh only), `[websecure, mesh]` (public) or `[websecure]` only with a path restriction in the rule, with
-    the wildcard certificate; any other host is rejected (no exceptions)."""
+    forgotten entryPoints would still be private, but an explicit list is what a reviewer can read. `<x>.<zone>` hosts
+    (every zone in ZONES) are `[mesh]` (mesh only), `[websecure, mesh]` (public) or `[websecure]` only with a path
+    restriction in the rule, with that zone's wildcard certificate (one router, one zone); any other host is rejected."""
     eps = r.get("entryPoints")
     assert eps and set(eps) <= {"websecure", "mesh"} and len(set(eps)) == len(eps), f"{name}: entryPoints must be explicit"
     hosts = re.findall(r"Host\(`([^`]+)`\)", r["rule"])
     assert hosts, f"{name}: certificates are requested per Host rule"
+    zones = set()
     for h in hosts:
-        assert h.endswith("." + SERVICE_ZONE), f"{name}: {h} is not directly under *.{SERVICE_ZONE}"
-        assert "." not in h[: -len(SERVICE_ZONE) - 1], f"{name}: {h} is not covered by *.{SERVICE_ZONE}"
+        z = zone_of(h)
+        assert z, f"{name}: {h} is not directly under one of " + ", ".join("*." + z for z in ZONES)
+        zones.add(z)
         assert "mesh" in eps or PATH_RESTRICTION.search(r["rule"]), f"{name}: {h} on websecure alone needs a path restriction"
-        assert r["tls"] == {"certResolver": "letsencrypt-dns", "domains": [{"main": f"*.{SERVICE_ZONE}"}]}, name
+    assert len(zones) == 1, f"{name}: one router, one wildcard certificate"
+    assert r["tls"] == _tls(zones.pop()), name
 
 
 def check_mesh_coverage(routers):
-    """Mesh peers resolve every service host to the mesh entrypoint: each needs a mesh router without a path restriction."""
-    hosts = {h for r in routers.values() for h in re.findall(r"Host\(`([^`]+)`\)", r["rule"]) if h.endswith("." + SERVICE_ZONE)}
+    """Mesh peers resolve every `<x>.<zone>` host (every zone in ZONES) to the mesh entrypoint: each needs a mesh router without a path restriction."""
+    hosts = {h for r in routers.values() for h in re.findall(r"Host\(`([^`]+)`\)", r["rule"]) if zone_of(h)}
     for h in hosts:
         assert any(f"Host(`{h}`)" in r["rule"] and "mesh" in r["entryPoints"] and not PATH_RESTRICTION.search(r["rule"])
                    for r in routers.values()), f"{h}: no full mesh router"
 
 
-def _tls(zone):
-    return {"certResolver": "letsencrypt-dns", "domains": [{"main": f"*.{zone}"}]}
-
-
 @pytest.mark.parametrize("rule,eps,tls,ok", [
-    ("Host(`a.service.veronoi.cc`)", ["mesh"], _tls(SERVICE_ZONE), True),
-    ("Host(`a.service.veronoi.cc`)", ["websecure", "mesh"], _tls(SERVICE_ZONE), True),
-    ("Host(`a.service.veronoi.cc`)", ["mesh", "websecure"], _tls(SERVICE_ZONE), True),
-    ("Host(`a.service.veronoi.cc`)", ["websecure"], _tls(SERVICE_ZONE), False),  # public without path limit and no mesh
-    ("Host(`a.service.veronoi.cc`) && PathPrefix(`/share/`)", ["websecure"], _tls(SERVICE_ZONE), True),
-    ("Host(`a.service.veronoi.cc`) && Path(`/x`)", ["websecure"], _tls(SERVICE_ZONE), True),
-    ("Host(`a.service.veronoi.cc`) && PathPrefix(`/share/`)", ["mesh"], _tls(SERVICE_ZONE), True),
+    ("Host(`a.service.veronoi.cc`)", ["mesh"], _tls("service.veronoi.cc"), True),
+    ("Host(`a.service.veronoi.cc`)", ["websecure", "mesh"], _tls("service.veronoi.cc"), True),
+    ("Host(`a.service.veronoi.cc`)", ["mesh", "websecure"], _tls("service.veronoi.cc"), True),
+    ("Host(`a.service.veronoi.cc`)", ["websecure"], _tls("service.veronoi.cc"), False),  # public without path limit and no mesh
+    ("Host(`a.service.veronoi.cc`) && PathPrefix(`/share/`)", ["websecure"], _tls("service.veronoi.cc"), True),
+    ("Host(`a.service.veronoi.cc`) && Path(`/x`)", ["websecure"], _tls("service.veronoi.cc"), True),
+    ("Host(`a.service.veronoi.cc`) && PathPrefix(`/share/`)", ["mesh"], _tls("service.veronoi.cc"), True),
     ("Host(`a.service.veronoi.cc`)", ["mesh"], _tls("veronoi.cc"), False),  # wrong wildcard
     ("Host(`a.service.veronoi.cc`)", ["websecure", "mesh"], {"certResolver": "letsencrypt"}, False),
-    ("Host(`a.b.service.veronoi.cc`)", ["mesh"], _tls(SERVICE_ZONE), False),  # not covered by the wildcard
+    ("Host(`a.b.service.veronoi.cc`)", ["mesh"], _tls("service.veronoi.cc"), False),  # not covered by the wildcard
     ("Host(`netbird.veronoi.cc`)", ["websecure"], {"certResolver": "letsencrypt"}, False),  # no exceptions any more
     ("Host(`auth.veronoi.cc`)", ["websecure"], {"certResolver": "letsencrypt"}, False),
-    ("Host(`auth.veronoi.cc`)", ["websecure", "mesh"], _tls(SERVICE_ZONE), False),
-    ("Host(`other.veronoi.cc`)", ["websecure"], {"certResolver": "letsencrypt"}, False),
+    ("Host(`auth.veronoi.cc`)", ["websecure", "mesh"], _tls("service.veronoi.cc"), False),
+    ("Host(`git.sapphic.world`)", ["websecure", "mesh"], _tls("sapphic.world"), True),
+    ("Host(`git.sapphic.world`)", ["mesh"], _tls("service.veronoi.cc"), False),  # wrong zone wildcard
+    ("Host(`a.b.sapphic.world`)", ["mesh"], _tls("sapphic.world"), False),
+    ("Host(`sapphic.world`)", ["mesh"], _tls("sapphic.world"), False),  # the apex is not covered
+    ("Host(`a.sapphic.world`) || Host(`b.service.veronoi.cc`)", ["mesh"], _tls("sapphic.world"), False),  # one router, one certificate
+    ("Host(`a.sapphic.world.evil.cc`)", ["mesh"], _tls("sapphic.world"), False),
 ])
 def test_check_router_domain_scheme(rule, eps, tls, ok):
     router = {"rule": rule, "entryPoints": eps, "tls": tls, "service": "x"}
@@ -302,7 +316,7 @@ def test_check_router_domain_scheme(rule, eps, tls, ok):
 
 def test_check_router_requires_entrypoints():
     with pytest.raises(AssertionError):
-        check_router("t", {"rule": "Host(`a.service.veronoi.cc`)", "tls": _tls(SERVICE_ZONE), "service": "x"})
+        check_router("t", {"rule": "Host(`a.service.veronoi.cc`)", "tls": _tls("service.veronoi.cc"), "service": "x"})
 
 
 def test_every_service_host_has_a_full_mesh_router():

@@ -1,7 +1,7 @@
 # Traefik (shared reverse proxy)
 
 One Traefik per node that serves HTTPS. It owns `80/tcp` and `443/tcp` on the node's public IP, a private listener on the mesh IP, and
-Let's Encrypt (DNS-01 for `*.service.veronoi.cc`).
+Let's Encrypt (DNS-01 for `*.service.veronoi.cc` and `*.sapphic.world`).
 It is app-agnostic: it never names an app. Every app ships its own routes, Traefik loads whatever is deployed on the node.
 Listed in `nodes/<name>.yml` under `apps:` (today: ecstasy). Generic mechanics: root [README](../../README.md) (Apps from git);
 the domain scheme (split DNS, router shapes): root README, Domain scheme.
@@ -16,8 +16,8 @@ the domain scheme (split DNS, router shapes): root README, Domain scheme.
 
 1. The app ships a file named **`routes.yml`** in its app directory: a Traefik *dynamic* configuration (`http:` routers and
    services, optionally `tcp:`/`tls:`).
-   Routers set `entryPoints` **explicitly** (`[mesh]` for a mesh-only `<x>.service.veronoi.cc`, `[websecure, mesh]` for a public one, `[websecure]` only path-limited). All use
-   `tls: {certResolver: letsencrypt-dns, domains: [{main: "*.service.veronoi.cc"}]}` and a `Host(...)` rule. Router/service names are prefixed
+   Routers set `entryPoints` **explicitly** (`[mesh]` for a mesh-only `<x>.<zone>`, `[websecure, mesh]` for a public one, `[websecure]` only path-limited). All use
+   `tls: {certResolver: letsencrypt-dns, domains: [{main: "*.<zone>"}]}` (the wildcard of the host's zone: `service.veronoi.cc` or `sapphic.world`) and a `Host(...)` rule. Router/service names are prefixed
    with the app name (names are global across `routes.yml` files).
 2. If the backend is a container on this node, the app joins the shared network (`Network=traefik.network`) and the route uses its
    `ContainerName` as host. If the backend is elsewhere (for example Authentik on coke, reached over the NetBird mesh), the route
@@ -44,9 +44,9 @@ whole configuration on the first file that does not parse. Apps contain other YA
   service names unique, every router has an existing service). The Authentik blueprint is
   provably *not* one, and a test enforces that `authentik` is never on a node with `traefik` (it would be deployed there in full).
 - **Router guard** (same test, `check_router`): every router sets `entryPoints` explicitly (a subset of `websecure`/`mesh`) and has a `Host(...)` rule;
-  a host directly under `service.veronoi.cc` must be `[mesh]`, `[websecure, mesh]`, or `[websecure]` with a `PathPrefix(`/`Path(` in the rule,
-  with the `*.service.veronoi.cc` wildcard and `letsencrypt-dns`; every service host also needs a mesh router without path restriction; deeper
-  subdomains and any host outside `service.veronoi.cc` are rejected. A public router
+  a host directly under `service.veronoi.cc` or `sapphic.world` must be `[mesh]`, `[websecure, mesh]`, or `[websecure]` with a `PathPrefix(`/`Path(` in the rule,
+  with that zone's `*.<zone>` wildcard and `letsencrypt-dns` (one router, one zone); every service host also needs a mesh router without path restriction; deeper
+  subdomains and any host outside those two zones are rejected. A public router
   without path limit and mesh, a typo'd resolver, or a router that forgot its entry points fails the test.
 - The static configuration is not a file, so it can never be picked up by the provider.
 
@@ -64,7 +64,7 @@ All flags are in the `Exec=` line of `traefik.container`:
 - `web` (`:80`, redirects to HTTPS) and `websecure` (`:443`) are published only on the public IP `176.65.149.212`. `mesh` (`:8443` in the
   container) is published only on the mesh IP `100.127.17.6:443` and is the **default entrypoint** (`asdefault=true`): a router without
   `entryPoints` is private, never public.
-- Resolver: `letsencrypt-dns` (`dnsChallenge`, provider `cloudflare`, `/letsencrypt/acme-dns.json`) for the wildcard `*.service.veronoi.cc`.
+- Resolver: `letsencrypt-dns` (`dnsChallenge`, provider `cloudflare`, `/letsencrypt/acme-dns.json`) for the wildcards `*.service.veronoi.cc` and `*.sapphic.world`.
   The DNS resolver asks `1.1.1.1:53,8.8.8.8:53` for the propagation check, so it always sees the public records.
 - `aliasHeadersStrategy=delete` (NetBird requires Traefik v3.7.13 or newer for it) and timeouts of `0` on `websecure` and `mesh`
   (`readTimeout`, `writeTimeout`, `idleTimeout`) and in `serversTransport.forwardingTimeouts` (`responseHeaderTimeout`, `idleConnTimeout`):
@@ -86,7 +86,7 @@ on the node after the deploy confirms it. Real client IPs in the access log depe
 ## Cloudflare token (your step, not in git)
 
 DNS-01 needs a token that can edit DNS. It is sensitive: create it in Cloudflare (My Profile -> API Tokens -> Create Token -> Custom)
-with **one** permission, `Zone` / `DNS` / `Edit`, and **Zone Resources: Include -> Specific zone -> `veronoi.cc`** only (nothing else, no
+with **one** permission, `Zone` / `DNS` / `Edit`, and **Zone Resources: Include -> Specific zone** for `veronoi.cc` and `sapphic.world` only (nothing else, no
 Zone:Zone). Then encrypt it for ecstasy (the prompt hides the input, the token never reaches the shell history or `ps`):
 
 ```
@@ -102,8 +102,8 @@ commit the token before the node needs Traefik. The file is a `[Container] Envir
 
 ## DNS (your step, not in git)
 
-Cloudflare wildcard (zone `veronoi.cc`, grey cloud, **no AAAA** unless the node has working public IPv6 with `80/443` open:
-Let's Encrypt prefers IPv6 and the answer must be the public IP only): `A *.service` -> `176.65.149.212` (public IP). Mesh peers get the mesh IP from the NetBird custom zone `service.veronoi.cc` (`A *` ->
+Cloudflare wildcards (zones `veronoi.cc` and `sapphic.world`, grey cloud, **no AAAA** unless the node has working public IPv6 with `80/443` open:
+Let's Encrypt prefers IPv6 and the answer must be the public IP only): `A *.service` (zone `veronoi.cc`) and `A *` (zone `sapphic.world`) -> `176.65.149.212` (public IP). Mesh peers get the mesh IP from the NetBird custom zones `service.veronoi.cc` and `sapphic.world` (`A *` ->
 `100.127.17.6`), see root README, Domain scheme. The former `A *.internal` record is obsolete: delete it, and delete the old `A netbird` / `A auth` records too. Provider firewall: `80/tcp` and
 `443/tcp`. The wildcard certificate needs neither (DNS-01). The old `acme.json` (TLS-ALPN resolver) in the volume is unused and can be deleted on the node.
 
