@@ -15,6 +15,7 @@ git ----22-----> ecstasy: Traefik `gitssh` (plain TCP, public + mesh IP)        
   The addresses are the backends in [`routes.yml`](routes.yml); a test checks that they match `PublishPort`.
 - Port 22 of ecstasy belongs to Traefik; ecstasy's own admin sshd listens on 2200 (`ssh_port` in `nodes/ecstasy.yml`, see the root README).
 - Git SSH URL: `git@git.sapphic.world:<user>/<repo>.git` (`SSH_DOMAIN=git.sapphic.world`, `SSH_PORT=22`). Forgejo's SSH server listens on 2222 inside the container.
+- Push-to-create is on for users and organisations (`ENABLE_PUSH_CREATE_USER`, `ENABLE_PUSH_CREATE_ORG`, `DEFAULT_PUSH_CREATE_PRIVATE=true`): `git push git@git.sapphic.world:<user>/<new-repo>.git main` creates the repository, **private**, without visiting the web UI. Pushing into someone else's namespace still needs permission on that user or organisation.
 - Volume `forgejo-data` is `# apps-sync: keep` (`apps-sync reset forgejo` keeps it, only `reset --include-persistent forgejo` wipes it).
 - The unit is gated on `/var/data/secrets/forgejo.env` and `forgejo-runners.env` (`ConditionPathExists`) and `Notify=healthy`. Its command is `forgejo-start.sh`: after the image entrypoint rendered `app.ini`, it runs `forgejo migrate`, then `forgejo-setup.sh`, then `exec forgejo web`. The order matters: Forgejo loads login sources into memory when `web` starts, so a setup run afterwards would only become live after a second restart.
 

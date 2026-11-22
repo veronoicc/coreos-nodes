@@ -1151,6 +1151,10 @@ def test_forgejo_settings():
         "FORGEJO__openid__ENABLE_OPENID_SIGNUP": "false",
         "FORGEJO__mailer__ENABLED": "false",
         "FORGEJO__actions__ENABLED": "true",
+        # push-to-create: `git push` to a new repo path creates it (private by default), for users and organisations
+        "FORGEJO__repository__ENABLE_PUSH_CREATE_USER": "true",
+        "FORGEJO__repository__ENABLE_PUSH_CREATE_ORG": "true",
+        "FORGEJO__repository__DEFAULT_PUSH_CREATE_PRIVATE": "true",
     }
     assert not [k for k in env if re.search(r"SECRET_KEY|INTERNAL_TOKEN|CLIENT_SECRET", k)]
 
