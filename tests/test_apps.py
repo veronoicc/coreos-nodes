@@ -1157,6 +1157,8 @@ def test_forgejo_settings():
         "FORGEJO__repository__ENABLE_PUSH_CREATE_USER": "true",
         "FORGEJO__repository__ENABLE_PUSH_CREATE_ORG": "true",
         "FORGEJO__repository__DEFAULT_PUSH_CREATE_PRIVATE": "true",
+        # Git LFS: objects in the data volume; Forgejo generates LFS_JWT_SECRET into app.ini on first start
+        "FORGEJO__server__LFS_START_SERVER": "true",
     }
     assert not [k for k in env if re.search(r"SECRET_KEY|INTERNAL_TOKEN|CLIENT_SECRET", k)]
 

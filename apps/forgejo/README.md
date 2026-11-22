@@ -94,6 +94,14 @@ EOF
 - **Runner secret:** rotating `FORGEJO_RUNNER_<n>_SECRET` in `forgejo-runners.env.sops` registers a new runner (new uuid, new secret); the old `coke-runner-<n>` row stays behind offline:
   delete it in Site Administration -> Actions -> Runners.
 
+## Git LFS
+
+`FORGEJO__server__LFS_START_SERVER=true` (`settings.env`) turns on the built-in LFS server; Forgejo generates `LFS_JWT_SECRET` into `app.ini` on the first start, like `INTERNAL_TOKEN`.
+Objects are stored in `/var/lib/gitea/git/lfs` inside `forgejo-data`, i.e. on the data disk, and are covered by the volume export under Backup.
+LFS works over HTTPS and SSH remotes: with an SSH remote the client asks Forgejo over SSH (`git-lfs-authenticate`) for a short-lived token and then transfers over `https://git.sapphic.world`.
+Traefik sets no request-body limit and no timeouts on `websecure`/`mesh` (the entrypoints in `apps/traefik/traefik.container`), so large objects pass through; a slow upload can still run into `LFS_HTTP_AUTH_EXPIRY` (default 24h).
+Users run `git lfs install` and `git lfs track` as usual; nothing else is needed.
+
 ## Backup
 
 State: `forgejo-data`. Stop `forgejo` first so the SQLite database is consistent: `sudo systemctl stop forgejo`, `sudo podman volume export forgejo-data > forgejo-data.tar`,
