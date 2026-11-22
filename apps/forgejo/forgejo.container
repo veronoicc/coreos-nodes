@@ -25,7 +25,7 @@ EnvironmentFile=/etc/containers/systemd/apps/forgejo/settings.env
 # FORGEJO__security__SECRET_KEY and AUTHENTIK_FORGEJO_CLIENT_SECRET (forgejo-setup.sh reads it for the login source).
 # Read by podman, not systemd: SELinux denies systemd (init_t) reading /var/data (var_t).
 EnvironmentFile=/var/data/secrets/forgejo.env
-# FORGEJO_RUNNER_{1,2,3}_SECRET: forgejo-setup.sh registers the three runners from them (the runners read the same file).
+# FORGEJO_RUNNER_{1..10}_SECRET: forgejo-setup.sh registers the ten runners from them (the runners read the same file).
 EnvironmentFile=/var/data/secrets/forgejo-runners.env
 Volume=forgejo-data.volume:/var/lib/gitea
 Volume=/etc/containers/systemd/apps/forgejo/forgejo-setup.sh:/usr/local/share/forgejo-setup.sh:ro,z
