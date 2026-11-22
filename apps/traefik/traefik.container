@@ -20,6 +20,11 @@ PublishPort=176.65.149.212:80:80
 PublishPort=176.65.149.212:443:443
 PublishPort=100.127.17.6:443:8443
 PublishPort=100.127.17.6:80:8080
+# Git SSH: port 22 of both addresses goes to the `gitssh` entrypoint, which forwards to Forgejo's SSH server on coke (see
+# apps/forgejo/routes.yml). The admin sshd therefore must not bind 22: it listens on 2200 (`ssh_port` in nodes/ecstasy.yml).
+# If it still bound 22 this unit would fail to start and every HTTPS route would go down with it.
+PublishPort=176.65.149.212:22:2222
+PublishPort=100.127.17.6:22:2222
 # The Cloudflare token for the DNS-01 resolver (CF_DNS_API_TOKEN, secrets/ecstasy/traefik.env.sops, see README.md). Read by
 # podman, not systemd: SELinux denies systemd (init_t) reading /var/data (var_t). Until secrets-sync rendered it the start
 # fails and is retried (RestartSec, StartLimitIntervalSec).
@@ -49,6 +54,10 @@ Exec=--log.level=INFO --accesslog=true \
   --entrypoints.mesh.transport.respondingtimeouts.readtimeout=0 \
   --entrypoints.mesh.transport.respondingtimeouts.writetimeout=0 \
   --entrypoints.mesh.transport.respondingtimeouts.idletimeout=0 \
+  --entrypoints.gitssh.address=:2222 \
+  --entrypoints.gitssh.transport.respondingtimeouts.readtimeout=0 \
+  --entrypoints.gitssh.transport.respondingtimeouts.writetimeout=0 \
+  --entrypoints.gitssh.transport.respondingtimeouts.idletimeout=0 \
   --entrypoints.meshweb.address=:8080 \
   --entrypoints.meshweb.http.redirections.entrypoint.to=:443 \
   --entrypoints.meshweb.http.redirections.entrypoint.scheme=https \

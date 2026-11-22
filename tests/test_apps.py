@@ -12,6 +12,7 @@ import pytest
 import yaml
 
 from conftest import ROOT
+import build
 
 APPS = ROOT / "apps"
 QUADLET_EXT = {".container", ".volume", ".network", ".pod", ".kube", ".build", ".image"}
@@ -198,7 +199,8 @@ def test_traefik_static_config():
     t = parse_quadlet(APPS / "traefik" / "traefik.container")
     c = t["Container"]
     # public listeners only on the public IP, the mesh listener only on the mesh IP (never 0.0.0.0)
-    assert set(c["PublishPort"]) == {f"{PUBLIC_IP}:80:80", f"{PUBLIC_IP}:443:443", f"{MESH_IP}:443:8443", f"{MESH_IP}:80:8080"}
+    assert set(c["PublishPort"]) == {f"{PUBLIC_IP}:80:80", f"{PUBLIC_IP}:443:443", f"{MESH_IP}:443:8443", f"{MESH_IP}:80:8080",
+                                     f"{PUBLIC_IP}:22:2222", f"{MESH_IP}:22:2222"}
     assert c["Network"] == ["traefik.network"]
     assert "ConditionPathExists" not in t["Unit"]  # runs on every node that serves HTTPS, not gated on a secret
     # the mesh address only exists once the NetBird client is up: ordered after it, retried forever (like authentik-server)
@@ -232,13 +234,23 @@ def test_traefik_static_config():
     assert f["entrypoints.meshweb.http.redirections.entrypoint.scheme"] == "https"
     assert "entrypoints.meshweb.asdefault" not in f
     assert "entrypoints.websecure.asdefault" not in f
+    # git SSH: plain TCP, Traefik forwards to Forgejo's own SSH server; never the default entrypoint
+    assert f["entrypoints.gitssh.address"] == ":2222" and "entrypoints.gitssh.asdefault" not in f
     for ep in ("websecure", "mesh"):
         assert f[f"entrypoints.{ep}.http.aliasheadersstrategy"] == "delete"
+    for ep in ("websecure", "mesh", "gitssh"):
         for k in ("readtimeout", "writetimeout", "idletimeout"):
             assert f[f"entrypoints.{ep}.transport.respondingtimeouts.{k}"] == "0"
     for k in ("responseheadertimeout", "idleconntimeout"):
         assert f[f"serverstransport.forwardingtimeouts.{k}"] == "0s"
     assert not [p for p in (APPS / "traefik").iterdir() if p.suffix in ROUTE_EXT], "traefik ships no routes of its own"
+
+
+@pytest.mark.parametrize("node", [n for n, apps in NODES.items() if "traefik" in apps])
+def test_traefik_node_keeps_port_22_free(node):
+    """Traefik publishes port 22 (git SSH). If the node's admin sshd still bound it, Traefik would fail to start and all
+    HTTPS would go down."""
+    assert build.load_node(node).get("ssh_port", 22) != 22
 
 
 def test_traefik_network_unit():
@@ -274,6 +286,34 @@ def check_router(name, r):
         assert "mesh" in eps or PATH_RESTRICTION.search(r["rule"]), f"{name}: {h} on websecure alone needs a path restriction"
     assert len(zones) == 1, f"{name}: one router, one wildcard certificate"
     assert r["tls"] == _tls(zones.pop()), name
+
+
+TCP_ENTRYPOINTS = {"gitssh"}
+
+
+def check_tcp_router(name, r):
+    """TCP routers exist only for raw protocols on their own entrypoint. A `HostSNI(`*`)` router on websecure/mesh would
+    swallow all HTTPS, so TCP routers are confined to TCP_ENTRYPOINTS, match everything and carry no tls."""
+    eps = r.get("entryPoints")
+    assert eps and set(eps) <= TCP_ENTRYPOINTS, f"{name}: tcp routers only on {sorted(TCP_ENTRYPOINTS)}"
+    assert r["rule"] == "HostSNI(`*`)", f"{name}: plain TCP matches everything"
+    assert "tls" not in r, f"{name}: no TLS termination on plain TCP"
+
+
+@pytest.mark.parametrize("router,ok", [
+    ({"rule": "HostSNI(`*`)", "entryPoints": ["gitssh"], "service": "x"}, True),
+    ({"rule": "HostSNI(`*`)", "entryPoints": ["websecure"], "service": "x"}, False),
+    ({"rule": "HostSNI(`*`)", "entryPoints": ["mesh"], "service": "x"}, False),
+    ({"rule": "HostSNI(`*`)", "service": "x"}, False),
+    ({"rule": "HostSNI(`*`)", "entryPoints": ["gitssh"], "tls": {}, "service": "x"}, False),
+    ({"rule": "HostSNI(`git.sapphic.world`)", "entryPoints": ["gitssh"], "service": "x"}, False),
+])
+def test_check_tcp_router(router, ok):
+    if ok:
+        check_tcp_router("t", router)
+    else:
+        with pytest.raises(AssertionError):
+            check_tcp_router("t", router)
 
 
 def check_mesh_coverage(routers):
@@ -354,9 +394,10 @@ def test_everything_traefik_reads_on_a_node_is_a_valid_route_file(node):
     foreign YAML (Authentik blueprint, static config) would break all routing, so it must be on another node."""
     files = route_files(node)
     assert files, node
-    routers, services = {}, {}
+    routers, services, tcp_routers, tcp_services = {}, {}, {}, {}
     for p in files:
-        http = load_routes(p).get("http", {})
+        cfg = load_routes(p)
+        http = cfg.get("http", {})
         for n, r in http.get("routers", {}).items():
             assert n not in routers, f"router {n} defined twice"
             routers[n] = r
@@ -364,8 +405,20 @@ def test_everything_traefik_reads_on_a_node_is_a_valid_route_file(node):
         for n, s in http.get("services", {}).items():
             assert n not in services, f"service {n} defined twice"
             services[n] = s
+        tcp = cfg.get("tcp", {})
+        for n, r in tcp.get("routers", {}).items():
+            assert n not in tcp_routers, f"tcp router {n} defined twice"
+            tcp_routers[n] = r
+            check_tcp_router(n, r)
+        for n, s in tcp.get("services", {}).items():
+            assert n not in tcp_services, f"tcp service {n} defined twice"
+            tcp_services[n] = s
     for n, r in routers.items():
         assert r["service"] in services, f"router {n}: unknown service {r['service']}"
+    for n, r in tcp_routers.items():
+        assert r["service"] in tcp_services, f"tcp router {n}: unknown service {r['service']}"
+    eps = [ep for r in tcp_routers.values() for ep in r["entryPoints"]]
+    assert len(eps) == len(set(eps)), "a plain-TCP entrypoint serves one router"
     check_mesh_coverage(routers)
     assert all(c.get("tls") for c in routers.values())
 

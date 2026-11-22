@@ -8,7 +8,7 @@ the domain scheme (split DNS, router shapes): root README, Domain scheme.
 
 | File | Content |
 |---|---|
-| `traefik.container` | `docker.io/library/traefik:v3.7.18`. The **static config is `Exec=` command line flags**, not a file. Publishes `176.65.149.212:80`, `176.65.149.212:443` (public) and `100.127.17.6:443` -> container `8443` (mesh). No container socket. |
+| `traefik.container` | `docker.io/library/traefik:v3.7.18`. The **static config is `Exec=` command line flags**, not a file. Publishes `176.65.149.212:80`, `176.65.149.212:443` (public), `100.127.17.6:443` -> container `8443` (mesh) and port `22` on both IPs -> container `2222` (git SSH, entrypoint `gitssh`). No container socket. |
 | `traefik.network` | Shared Quadlet network `traefik.network` (`172.30.0.0/24`). Containers that Traefik routes to add `Network=traefik.network`. Quadlet unit names are global, so this works across app directories. |
 | `traefik-letsencrypt.volume` | ACME account and certificates (`acme-dns.json`; an old `acme.json` is unused). Persistent: `# apps-sync: keep`. |
 
@@ -64,6 +64,10 @@ All flags are in the `Exec=` line of `traefik.container`:
 - `web` (`:80`, redirects to HTTPS) and `websecure` (`:443`) are published only on the public IP `176.65.149.212`. `mesh` (`:8443` in the
   container) is published only on the mesh IP `100.127.17.6:443` and is the **default entrypoint** (`asdefault=true`): a router without
   `entryPoints` is private, never public.
+- `gitssh` (`:2222` in the container) is a plain-TCP entrypoint published as port `22` on the public and the mesh IP. Forgejo's route file
+  forwards it to Forgejo's built-in SSH server on coke. Only a `HostSNI(`*`)` router without `tls` on `gitssh` is allowed (a test enforces it):
+  such a router on `websecure`/`mesh` would swallow all HTTPS. **ecstasy's admin sshd must not bind port 22**: it listens on `2200` (`ssh_port` in
+  `nodes/ecstasy.yml`); otherwise this unit fails to start and every HTTPS route goes down.
 - Resolver: `letsencrypt-dns` (`dnsChallenge`, provider `cloudflare`, `/letsencrypt/acme-dns.json`) for the wildcards `*.service.veronoi.cc` and `*.sapphic.world`.
   The DNS resolver asks `1.1.1.1:53,8.8.8.8:53` for the propagation check, so it always sees the public records.
 - `aliasHeadersStrategy=delete` (NetBird requires Traefik v3.7.13 or newer for it) and timeouts of `0` on `websecure` and `mesh`
@@ -105,8 +109,8 @@ commit the token before the node needs Traefik. The file is a `[Container] Envir
 
 Cloudflare wildcards (zones `veronoi.cc` and `sapphic.world`, grey cloud, **no AAAA** unless the node has working public IPv6 with `80/443` open:
 Let's Encrypt prefers IPv6 and the answer must be the public IP only): `A *.service` (zone `veronoi.cc`) and `A *` (zone `sapphic.world`) -> `176.65.149.212` (public IP). Mesh peers get the mesh IP from the NetBird custom zones `service.veronoi.cc` and `sapphic.world` (`A *` ->
-`100.127.17.6`), see root README, Domain scheme. The former `A *.internal` record is obsolete: delete it, and delete the old `A netbird` / `A auth` records too. Provider firewall: `80/tcp` and
-`443/tcp`. The wildcard certificate needs neither (DNS-01). The old `acme.json` (TLS-ALPN resolver) in the volume is unused and can be deleted on the node.
+`100.127.17.6`), see root README, Domain scheme. The former `A *.internal` record is obsolete: delete it, and delete the old `A netbird` / `A auth` records too. Provider firewall: `80/tcp`, `443/tcp`,
+`22/tcp` (git SSH) and `2200/tcp` (admin SSH). The wildcard certificate needs none of them (DNS-01). The old `acme.json` (TLS-ALPN resolver) in the volume is unused and can be deleted on the node.
 
 ## Backup, reset, upgrade
 
