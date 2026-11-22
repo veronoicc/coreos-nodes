@@ -1081,8 +1081,22 @@ def test_manifest_files_listed_exist_or_are_not_yet_created():
     for node in NODES:
         for file, dest, mode, owner, units in targets(node):
             for u in units.split(","):
-                assert u == "netbird.service" or any(
+                assert u in ("-", "netbird.service") or any(
                     (APPS / a / f"{u[:-len('.service')]}.container").exists() for a in NODES[node]), f"{node}: {u} is not deployed there"
+
+
+REGISTRY_AUTH = ["registry-auth.json.sops", "/root/.config/containers/auth.json", "0600", "root:root", "-"]
+
+
+@pytest.mark.parametrize("node", sorted(NODES))
+def test_every_node_authenticates_to_the_forgejo_registry(node):
+    """containers-auth.json for git.sapphic.world, read by podman on every pull (no unit restart)."""
+    assert REGISTRY_AUTH in targets(node)
+    f = ROOT / "secrets" / node / "registry-auth.json.sops"
+    text = f.read_text()
+    assert "ENC[AES256_GCM" in text and "age1" in text
+    assert '"auths"' in text  # json sops keeps keys in clear text, values encrypted
+    assert "git.sapphic.world" in text
 
 
 # ------------------------------------------------------------------ forgejo

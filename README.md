@@ -179,6 +179,12 @@ the admin key and that node's key.
 **Rotating a secret:** `sops secrets/<node>/<file>.sops` (needs your admin key), edit, commit, push. The node restarts only the affected
 units within 15 minutes, or immediately with `sudo systemctl start secrets-sync`.
 
+**Registry auth:** every node has `registry-auth.json.sops` -> `/root/.config/containers/auth.json` (0600 root, no unit restarts): a containers-auth.json
+`{"auths":{"git.sapphic.world":{"auth":"<base64 user:token>"}}}` for the Forgejo user `veronoicc` (personal access token). Root podman reads that path on every
+pull, so a Quadlet `Image=git.sapphic.world/veronoicc/<image>:<tag>` pulls private images with it (`/etc/containers/auth.json` is NOT read). To rotate the token,
+create a new one in Forgejo and re-encrypt **both** files (`secrets/ecstasy/` and `secrets/coke/`) with the pattern above: build the JSON in memory and pipe it to
+`sops encrypt --filename-override <path> --input-type json --output-type json --output <path> /dev/stdin`, so the plaintext never touches disk.
+
 **Key loss:**
 
 - Node key lost (data partition wiped or `age.key` deleted): the node generates a new key on its next run. Run `scripts/node-key.sh` and
