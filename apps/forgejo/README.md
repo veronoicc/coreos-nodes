@@ -65,7 +65,8 @@ Three instance-wide runners `coke-runner-1..3` (Forgejo Runner 13.2.2), each pai
 ## Secrets (your step, recipe)
 
 The OIDC client secret exists in two encrypted files, byte-identical (`forgejo.env.sops` and `authentik-forgejo.env.sops`). The runner secrets are shared by Forgejo and the runners
-(`forgejo-runners.env.sops`). Create or rotate with (never print or store plaintext; run from the repo root so `.sops.yaml` applies):
+(`forgejo-runners.env.sops`). Create them with the block below, **first deploy only** (never print or store plaintext; run from the repo root so `.sops.yaml` applies). It generates
+`FORGEJO__security__SECRET_KEY` and the runner secrets too, so it must not be reused to rotate anything:
 
 ```
 python3 - <<'EOF'
@@ -81,7 +82,14 @@ enc("secrets/coke/forgejo-runners.env.sops", "".join(f"FORGEJO_RUNNER_{i}_SECRET
 EOF
 ```
 
-Rotating `FORGEJO__security__SECRET_KEY` makes already-stored encrypted values (2FA, tokens) unreadable; do it only on purpose.
+### Rotation (never rerun the block above)
+
+- **OIDC client secret:** generate a new value and set `AUTHENTIK_FORGEJO_CLIENT_SECRET` in **both** `secrets/coke/forgejo.env.sops` and `secrets/coke/authentik-forgejo.env.sops` with
+  `sops secrets/coke/<file>.sops` (needs your admin key), push. The byte-identical value must land in both files; each restarts its unit through secrets-sync.
+- **`FORGEJO__security__SECRET_KEY`: never regenerate it.** Forgejo derives the encryption key of every Actions secret (and of stored 2FA/token values) from it; after a change they become unreadable
+  and every workflow of a repository or owner that has a secret stops receiving its secrets.
+- **Runner secret:** rotating `FORGEJO_RUNNER_<n>_SECRET` in `forgejo-runners.env.sops` registers a new runner (new uuid, new secret); the old `coke-runner-<n>` row stays behind offline:
+  delete it in Site Administration -> Actions -> Runners.
 
 ## Backup
 
@@ -95,7 +103,7 @@ Bump the tag in `forgejo.container` and push; `apps-sync` restarts only the chan
 ## Failure modes
 
 - coke rebooted: `forgejo` waits for the mesh interface and retries every 10 s (`StartLimitIntervalSec=0`).
-- Both secret files missing: the unit is skipped (`ConditionResult=no`); `journalctl -u secrets-sync` tells why.
+- Either secret file missing: the unit is skipped (`ConditionResult=no`); `journalctl -u secrets-sync` tells why.
 - `forgejo-setup.sh` fails (run by `forgejo-start.sh`): `web` never starts, the unit is retried; `journalctl -u forgejo` shows which command (a missing runner secret aborts at the first use).
 - Git SSH hangs or answers `SSH-2.0-OpenSSH`: Traefik's `gitssh` entrypoint is not live or ecstasy's sshd still binds port 22.
 - Permission errors on `/var/lib/gitea` at the first start: append `:U` to the `forgejo-data.volume` mount (chown to uid 1000).

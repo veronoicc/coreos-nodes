@@ -1,12 +1,12 @@
 [Unit]
 Description=Traefik (shared reverse proxy, TLS via Let's Encrypt)
 Wants=network-online.target netbird.service
-# netbird.service is the baked NetBird client: the mesh interface (wt0) has to exist before the mesh listener can be bound to
-# the mesh address. Only ordered, not required; if the bind still fails the unit is retried (StartLimitIntervalSec, RestartSec).
+# netbird.service is the baked NetBird client. Only ordered, not required: `ip_nonlocal_bind` (build.py) lets the bind to the mesh
+# address succeed before the mesh interface (wt0) exists; Restart (StartLimitIntervalSec, RestartSec) covers the remaining failures (secret missing).
 After=network-online.target netbird.service
 RequiresMountsFor=/var/data
-# Retry forever: after a reboot the mesh address appears some seconds after the client started. Without this a failed bind
-# would leave Traefik down, and with it every public route.
+# Retry forever: without this a failure (e.g. the Cloudflare token not rendered yet) would leave Traefik down, and with it every
+# public route.
 StartLimitIntervalSec=0
 
 [Container]

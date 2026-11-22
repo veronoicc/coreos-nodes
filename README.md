@@ -289,6 +289,8 @@ order of steps, backup and security notes: [`apps/netbird/README.md`](apps/netbi
 The NetBird *client* (`netbird.container`, `NB_SETUP_KEY` from `secrets/<node>/netbird.env.sops`) is baked into the Ignition and is not an app.
 Paperless-ngx on coke (`paperless.service.veronoi.cc`, mesh only except public `/share/` links, login only via Authentik) is a service of the [domain scheme](#domain-scheme):
 [`apps/paperless/README.md`](apps/paperless/README.md) (setup order, first superuser, backup, route).
+Forgejo on coke (`git.sapphic.world`, public HTTPS and git over SSH on port 22 through Traefik's `gitssh` entrypoint, login only via Authentik, Actions runners with docker:dind):
+[`apps/forgejo/README.md`](apps/forgejo/README.md) (topology, secrets and their rotation, runners).
 Grafana and TimescaleDB on coke (`graph.sapphic.world`, mesh only except public-dashboard paths, login only via Authentik; the database on the mesh address, TCP 5432):
 [`apps/monitoring/README.md`](apps/monitoring/README.md) (topology, secrets, public dashboards and embedding).
 scanservjs on coke (`scan.service.veronoi.cc`, mesh only, no login of its own; web UI for the HP flatbed, scans go through the shared `paperless-consume` volume into Paperless):

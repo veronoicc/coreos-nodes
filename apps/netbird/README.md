@@ -285,3 +285,4 @@ To rotate the Authentik client secret: change it in `secrets/coke/authentik.env.
 If the backend is down, existing tunnels keep working (WireGuard peers talk directly or via relays already in use). New peers, login,
 ACL/route changes and relayed re-connections do not work until it is back. If Authentik or the mesh link to coke is down, dashboard login
 is impossible (there is no local login); the mesh itself keeps working.
+After a reboot or restart while ecstasy's mesh is down (every ecstasy boot, including each Zincati update), `netbird-server` waits for one failed Authentik discovery (`auth.sapphic.world` is only reachable through the mesh that this very server brings up) before it serves; it does not deadlock, the Authentik connector is re-opened on first use. Check the gap with `journalctl -u netbird-server -o short-precise`; if it hangs for minutes, `sudo systemctl restart netbird-server`.
