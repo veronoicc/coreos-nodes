@@ -12,15 +12,6 @@ http:
         domains:
           - main: "*.sapphic.world"
       service: authentik
-    # TEMPORARY: old host until every peer is re-pointed (README "Renaming the NetBird host"); removed in the next step
-    authentik-legacy:
-      rule: Host(`auth.service.veronoi.cc`)
-      entryPoints: [websecure, mesh]
-      tls:
-        certResolver: letsencrypt-dns
-        domains:
-          - main: "*.service.veronoi.cc"
-      service: authentik
   services:
     authentik:
       loadBalancer:

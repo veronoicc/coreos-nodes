@@ -11,7 +11,7 @@ The NetBird **client** on the node is not an app, it is baked into the Ignition 
 |---|---|---|
 | `netbird-server.container` | apps-sync | `netbirdio/netbird-server`: management, signal, relay, STUN and the embedded Dex IdP in one container. Publishes only `3478/udp`. |
 | `netbird-dashboard.container`, `dashboard.env` | apps-sync | Web UI, not published. `dashboard.env` is plain (no secrets). |
-| `routes.yml` | apps-sync | Traefik routes (gRPC h2c, WebSocket/relay, API, OAuth2, dashboard) for `mesh.sapphic.world` (public + mesh, wildcard certificate), loaded by `apps/traefik`. The `-legacy` routers keep `netbird.service.veronoi.cc` served until every peer is re-pointed ("Renaming the NetBird host"). |
+| `routes.yml` | apps-sync | Traefik routes (gRPC h2c, WebSocket/relay, API, OAuth2, dashboard) for `mesh.sapphic.world` (public + mesh, wildcard certificate), loaded by `apps/traefik`. |
 | `netbird-data.volume` | apps-sync | Named volume with the NetBird database. Persistent. |
 | `/var/data/netbird-server/config.yaml` | secrets-sync | The server config with all secrets, from `secrets/ecstasy/netbird-server.yaml.sops` (0600 root). |
 
@@ -241,8 +241,8 @@ plain file changes); a change to `routes.yml` reloads Traefik.
 
 History: NetBird moved from `netbird.veronoi.cc` to `netbird.service.veronoi.cc` (Authentik from `auth.veronoi.cc` to `auth.service.veronoi.cc`), and
 **latest** to `mesh.sapphic.world` (Authentik to `auth.sapphic.world`, Grafana to `graph.sapphic.world`; the `sapphic.world` zone has its own wildcard
-certificate and NetBird DNS zone, root README "Domain scheme"). The old NetBird and Authentik hosts stay served by temporary `*-legacy` routers
-(`apps/netbird/routes.yml`, `apps/authentik/routes.yml`) until every peer is re-pointed; the next change deletes them. What a rename needs:
+certificate and NetBird DNS zone, root README "Domain scheme"). The old NetBird and Authentik hosts were served by temporary `*-legacy` routers while the peers
+were re-pointed; those routers are deleted, so the old names now answer 404 from Traefik. What a rename needs:
 
 1. `secrets/ecstasy/netbird-server.yaml.sops`: `server.exposedAddress`, `server.auth.issuer` (`<new host>/oauth2`) and `server.dashboardRedirectURIs`; `dashboard.env`: the management/issuer URLs.
 2. Every client: `NB_MANAGEMENT_URL` in `secrets/<node>/netbird.env.sops`. The env var is **not** applied on a restart (the stored `ManagementURL` wins), so on each peer run

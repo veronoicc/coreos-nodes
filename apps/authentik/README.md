@@ -68,7 +68,7 @@ and joins the mesh only after this; no login needed) and run `scripts/add-node.s
 | 5 | browser | Authentik initial setup `https://auth.sapphic.world/if/flow/initial-setup/` (needs DNS and the route from steps 3 and 4). |
 | 6 | NetBird | Add Authentik as an identity provider: [`apps/netbird/README.md`](../netbird/README.md), "Login via Authentik". |
 
-DNS `auth.sapphic.world` is the `sapphic.world` wildcard, nothing to create. `auth.service.veronoi.cc` stays served by the temporary `authentik-legacy` router until the peers are re-pointed ([`apps/netbird/README.md`](../netbird/README.md), "Renaming the NetBird host").
+DNS `auth.sapphic.world` is the `sapphic.world` wildcard, nothing to create.
 
 ### 2. coke joins the mesh
 

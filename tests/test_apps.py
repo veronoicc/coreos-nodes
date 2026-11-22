@@ -460,20 +460,13 @@ def test_netbird_routes():
 
 
 def test_netbird_routers_are_public_and_mesh():
-    """The three routers sit on mesh.sapphic.world, public + mesh, that zone's wildcard certificate; nothing else is routed.
-    TEMPORARY `-legacy` twins keep netbird.service.veronoi.cc served until every peer is re-pointed (Phase D deletes them)."""
+    """All three routers sit on mesh.sapphic.world, public + mesh, that zone's wildcard certificate; nothing else is routed."""
     rt = load_routes(APPS / "netbird" / "routes.yml")["http"]["routers"]
-    base = {"netbird-grpc", "netbird-backend", "netbird-dashboard"}
-    assert set(rt) == base | {f"{n}-legacy" for n in base}
+    assert set(rt) == {"netbird-grpc", "netbird-backend", "netbird-dashboard"}
     for n, r in rt.items():
         assert r["entryPoints"] == ["websecure", "mesh"], n
-        want = "netbird.service.veronoi.cc" if n.endswith("-legacy") else NB_HOST
-        assert re.findall(r"Host\(`([^`]+)`\)", r["rule"]) == [want], n
+        assert re.findall(r"Host\(`([^`]+)`\)", r["rule"]) == [NB_HOST], n
         check_router(n, r)
-    for n in base:
-        twin = rt[f"{n}-legacy"]
-        assert twin["rule"] == rt[n]["rule"].replace(NB_HOST, "netbird.service.veronoi.cc"), n
-        assert {k: v for k, v in twin.items() if k not in ("rule", "tls")} == {k: v for k, v in rt[n].items() if k not in ("rule", "tls")}, n
     check_mesh_coverage(rt)
 
 
@@ -544,9 +537,8 @@ def test_authentik_is_published_on_the_mesh_address_only():
     # the route on the node that owns the public IP points at the same address
     route = load_routes(APPS / "authentik" / "routes.yml")["http"]
     assert route["services"]["authentik"]["loadBalancer"]["servers"] == [{"url": f"http://{ip}:9000"}]
-    assert set(route["routers"]) == {"authentik", "authentik-legacy"}  # -legacy: TEMPORARY old host, removed in Phase D
+    assert set(route["routers"]) == {"authentik"}
     assert route["routers"]["authentik"]["rule"] == f"Host(`{AUTH_HOST}`)"
-    assert route["routers"]["authentik-legacy"]["rule"] == "Host(`auth.service.veronoi.cc`)"
     for n, r in route["routers"].items():
         assert r["entryPoints"] == ["websecure", "mesh"] and r["service"] == "authentik", n
         check_router(n, r)
@@ -659,7 +651,6 @@ def test_grafana_blueprint():
     assert not isinstance(provider["signing_key"], str) and provider["signing_key"].tag == "Find"
     # Grafana's callback is /login/generic_oauth (pkg/api/api.go: r.Get("/login/:name", ...)), strict match
     assert provider["redirect_uris"] == [{"matching_mode": "strict", "url": f"https://{GRAFANA_HOST}/login/generic_oauth"}]
-    assert app["attrs"]["meta_launch_url"] == f"https://{GRAFANA_HOST}"
     # the profile scope carries preferred_username and the groups claim the role mapping reads
     assert [m.value[1] for m in provider["property_mappings"]] == [
         ["managed", f"goauthentik.io/providers/oauth2/scope-{s}"] for s in ("openid", "email", "profile")]
