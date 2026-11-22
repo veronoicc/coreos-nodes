@@ -69,7 +69,7 @@ def boot(tmp_path_factory, node, mesh):
     cmd = [
         "qemu-system-x86_64", "-m", RAM[node], "-smp", "2", "-nographic",
         "-drive", f"if=virtio,file={disk}",
-        "-nic", f"user,model=virtio,hostfwd=tcp:127.0.0.1:{port}-:22",
+        "-nic", f"user,model=virtio,hostfwd=tcp:127.0.0.1:{port}-:{build.load_node(node).get('ssh_port', 22)}",
         "-netdev", mesh, "-device", f"virtio-net-pci,netdev=mesh,mac={MESH_MAC[node]}",
         "-fw_cfg", f"name=opt/com.coreos/config,file={ign}",
     ]

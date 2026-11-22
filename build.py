@@ -157,6 +157,28 @@ PermitRootLogin no
 
 HOST_KEYS = f"HostKey {DATA}/ssh/ssh_host_ed25519_key\n"
 
+SSHD_PORT_UNIT = """[Unit]
+Description=Label the admin sshd port for SELinux (FCOS has no semanage)
+Before=sshd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'semodule -l | grep -qx sshd-port || semodule -i /etc/ssh/sshd-port.cil'
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def ssh_port(name, node):
+    """Admin sshd port of a node (default 22)."""
+    p = node.get("ssh_port", 22)
+    if isinstance(p, bool) or not isinstance(p, int) or not 1 <= p <= 65535:
+        raise ConfigError(f"{name}: ssh_port must be an integer port 1-65535, got {p!r}")
+    return p
+
+
 APPS_SYNC_SERVICE = """[Unit]
 Description=Sync Quadlet apps from git
 Wants=network-online.target
@@ -415,6 +437,13 @@ def render(config, name, node, root=ROOT):
     keyfile = network_keyfile(name, node.get("network"))
     if keyfile:
         butane["storage"]["files"].append(inline_file(keyfile_path(name), keyfile, 0o600))
+    port = ssh_port(name, node)
+    if port != 22:
+        butane["storage"]["files"] += [
+            inline_file("/etc/ssh/sshd_config.d/10-port.conf", f"Port {port}\n", 0o600),
+            inline_file("/etc/ssh/sshd-port.cil", f"(portcon tcp {port} (system_u object_r ssh_port_t ((s0) (s0))))\n"),
+        ]
+        butane["systemd"]["units"].append({"name": "sshd-port-selinux.service", "enabled": True, "contents": SSHD_PORT_UNIT})
     return butane
 
 

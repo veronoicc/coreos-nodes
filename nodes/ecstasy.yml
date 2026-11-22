@@ -14,6 +14,9 @@ disk_gib: 20
 # routes.yml of every app listed on any node (coke's authentik, paperless), see README "Apps from git".
 apps: [traefik, netbird]
 
+# admin sshd; port 22 of the public and mesh IP is git SSH (Traefik -> Forgejo)
+ssh_port: 2200
+
 # Extra users on top of config.yml (same shape):
 # users:
 #   - name: bob

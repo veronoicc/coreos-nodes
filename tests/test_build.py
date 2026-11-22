@@ -128,6 +128,34 @@ def test_ssh_hardening_and_persistent_host_keys(ign):
     assert "data=/var/data" in init and "$data/ssh/ssh_host_ed25519_key" in init
 
 
+PORT_FILES = ("/etc/ssh/sshd_config.d/10-port.conf", "/etc/ssh/sshd-port.cil")
+
+
+def test_ssh_port_renders_dropin_cil_and_unit():
+    ign = build_ign(base_config(), node=base_node(ssh_port=2200))
+    files = {f["path"]: f for f in ign["storage"]["files"]}
+    assert ign_file(ign, "/etc/ssh/sshd_config.d/10-port.conf") == "Port 2200\n"
+    assert files["/etc/ssh/sshd_config.d/10-port.conf"]["mode"] == 0o600
+    assert ign_file(ign, "/etc/ssh/sshd-port.cil") == "(portcon tcp 2200 (system_u object_r ssh_port_t ((s0) (s0))))\n"
+    unit = next(u for u in ign["systemd"]["units"] if u["name"] == "sshd-port-selinux.service")
+    assert unit["enabled"]
+    assert "Before=sshd.service" in unit["contents"]
+    assert "ExecStart=/bin/sh -c 'semodule -l | grep -qx sshd-port || semodule -i /etc/ssh/sshd-port.cil'" in unit["contents"]
+
+
+@pytest.mark.parametrize("node", [base_node(), base_node(ssh_port=22)])
+def test_default_ssh_port_adds_nothing(node):
+    ign = build_ign(base_config(), node=node)
+    assert not {f["path"] for f in ign["storage"]["files"]} & set(PORT_FILES)
+    assert "sshd-port-selinux.service" not in [u["name"] for u in ign["systemd"]["units"]]
+
+
+@pytest.mark.parametrize("bad", ["2200", True, 0, 70000])
+def test_bad_ssh_port_rejected(bad):
+    with pytest.raises(build.ConfigError, match="ssh_port"):
+        build_ign(base_config(), node=base_node(ssh_port=bad))
+
+
 def test_netbird_quadlet_gated_and_secret_free(ign):
     q = ign_file(ign, "/etc/containers/systemd/netbird.container")
     lines = q.splitlines()

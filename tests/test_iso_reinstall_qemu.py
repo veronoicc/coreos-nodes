@@ -38,7 +38,7 @@ class Vm:
         cmd = [
             "qemu-system-x86_64", "-m", "4096", "-smp", "2", "-nographic", "-boot", "once=d",
             "-drive", f"if=virtio,file={self.disk}", "-cdrom", str(iso),
-            "-nic", f"user,model=virtio,hostfwd=tcp:127.0.0.1:{self.port}-:22",
+            "-nic", f"user,model=virtio,hostfwd=tcp:127.0.0.1:{self.port}-:{build.load_node('ecstasy').get('ssh_port', 22)}",
         ]
         cmd += ["-enable-kvm", "-cpu", "host"] if Path("/dev/kvm").exists() else []
         self.log = open(self.tmp / "console.log", "w")

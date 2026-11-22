@@ -20,6 +20,8 @@ partition labelled `data` on the rest of the disk mounted at `/var/data`.
 `/var/data/secrets` (0700) live on that partition. NetBird runs as a Quadlet that
 only starts once `/var/data/secrets/netbird.env` exists (rendered by `secrets-sync` from SOPS-encrypted files, see [Secrets](#secrets-sops--age)). Zincati auto-updates stay on.
 
+**Admin SSH:** ecstasy's sshd listens on port 2200 (`ssh -p 2200 …`, or `Host ecstasy.node.veronoi.cc` / `Port 2200` in `~/.ssh/config`), because port 22 of its public and mesh IP is git SSH (Traefik → Forgejo). Set `ssh_port:` in `nodes/<name>.yml` to move a node's sshd. FCOS ships no `semanage`, so the port gets its SELinux label (`ssh_port_t`) from a CIL module that `sshd-port-selinux.service` installs before sshd starts.
+
 **Disk size:** root is `root_size_gib` (default 8, FCOS needs about 8 GiB), plus about 1 GiB boot area, plus a `data`
 partition on the rest. The disk must be at least `root_size_gib + 3` GiB, otherwise Ignition fails at first boot with
 "Failed to mount sysroot" (the installer itself does not notice). A "20 GB" plan is often under 20 GiB: check with
