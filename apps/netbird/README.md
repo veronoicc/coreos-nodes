@@ -1,6 +1,6 @@
 # Self-hosted NetBird backend
 
-Optional control plane on ecstasy, domain `netbird.service.veronoi.cc`. Fully declarative: Quadlets and plain config from `apps/netbird/` via
+Optional control plane on ecstasy, domain `mesh.sapphic.world`. Fully declarative: Quadlets and plain config from `apps/netbird/` via
 `apps-sync`, the server config with its secrets as `secrets/ecstasy/netbird-server.yaml.sops` via `secrets-sync`, state in a Quadlet named
 volume. TLS and routing come from the shared [Traefik](../traefik/README.md) app. No helper script, no step on the node except
 reinstalling it once (see below). Generic mechanics: root [README](../../README.md) (Apps from git, Secrets).
@@ -11,7 +11,7 @@ The NetBird **client** on the node is not an app, it is baked into the Ignition 
 |---|---|---|
 | `netbird-server.container` | apps-sync | `netbirdio/netbird-server`: management, signal, relay, STUN and the embedded Dex IdP in one container. Publishes only `3478/udp`. |
 | `netbird-dashboard.container`, `dashboard.env` | apps-sync | Web UI, not published. `dashboard.env` is plain (no secrets). |
-| `routes.yml` | apps-sync | Traefik routes (gRPC h2c, WebSocket/relay, API, OAuth2, dashboard) for `netbird.service.veronoi.cc` (public + mesh, wildcard certificate), loaded by `apps/traefik`. |
+| `routes.yml` | apps-sync | Traefik routes (gRPC h2c, WebSocket/relay, API, OAuth2, dashboard) for `mesh.sapphic.world` (public + mesh, wildcard certificate), loaded by `apps/traefik`. The `-legacy` routers keep `netbird.service.veronoi.cc` served until every peer is re-pointed ("Renaming the NetBird host"). |
 | `netbird-data.volume` | apps-sync | Named volume with the NetBird database. Persistent. |
 | `/var/data/netbird-server/config.yaml` | secrets-sync | The server config with all secrets, from `secrets/ecstasy/netbird-server.yaml.sops` (0600 root). |
 
@@ -42,7 +42,7 @@ Details: root README, "Change users (reinstall, keep data)".
 
 ## Prerequisites
 
-- DNS: nothing to create: `netbird.service.veronoi.cc` is covered by the Cloudflare wildcard `A *.service` -> `176.65.149.212` (ecstasy), **no AAAA**
+- DNS: nothing per host: `mesh.sapphic.world` is covered by the Cloudflare wildcard `A *` (zone `sapphic.world`) -> `176.65.149.212` (ecstasy), **no AAAA**
   (the public IP must be the only answer; ecstasy has no working public IPv6 with `80/443` open).
 - Provider firewall: `80/tcp` and `443/tcp` (HTTP redirect, HTTPS/gRPC/WebSocket) and `3478/udp` (STUN cannot be proxied).
 - The node has 2 GB+ RAM and the secrets tooling set up (age key published, your admin key a recipient, `.sops.yaml` committed:
@@ -58,7 +58,7 @@ settings), encrypted with SOPS. The plaintext only exists in a pipe: random secr
 ```
 printf 'server:
   listenAddress: ":80"
-  exposedAddress: "https://netbird.service.veronoi.cc:443"
+  exposedAddress: "https://mesh.sapphic.world:443"
   stunPorts:
     - 3478
   metricsPort: 9090
@@ -68,13 +68,13 @@ printf 'server:
   authSecret: "%s"
   dataDir: "/var/lib/netbird"
   auth:
-    issuer: "https://netbird.service.veronoi.cc/oauth2"
+    issuer: "https://mesh.sapphic.world/oauth2"
     localAuthDisabled: false
     signKeyRefreshEnabled: true
     sessionCookieEncryptionKey: "%s"
     dashboardRedirectURIs:
-      - "https://netbird.service.veronoi.cc/nb-auth"
-      - "https://netbird.service.veronoi.cc/nb-silent-auth"
+      - "https://mesh.sapphic.world/nb-auth"
+      - "https://mesh.sapphic.world/nb-silent-auth"
     cliRedirectURIs:
       - "http://localhost:53000/"
   reverseProxy:
@@ -143,13 +143,13 @@ and still renders the other targets (for example `netbird.env.sops`); the backen
 The order for the whole setup is: **1. NetBird with its local login (this page)**, 2. coke joins with a setup key, 3. Authentik
 behind ecstasy's Traefik, 4. NetBird login via Authentik. Details of 2 and 3: [`apps/authentik/README.md`](../authentik/README.md).
 
-1. Once DNS resolves and the ports are open, open `https://netbird.service.veronoi.cc/setup` and create the first admin (dashboard and
+1. Once DNS resolves and the ports are open, open `https://mesh.sapphic.world/setup` and create the first admin (dashboard and
    embedded Dex are served by the node itself; the certificate is issued on the first request).
 2. Dashboard -> Setup Keys -> create a key.
 3. The committed `secrets/ecstasy/netbird.env.sops` holds a dummy `NB_SETUP_KEY`. Replace it with the real key (the client Quadlet
-   is baked into the Ignition, see root README "Secrets"; `NB_MANAGEMENT_URL=https://netbird.service.veronoi.cc:443`):
+   is baked into the Ignition, see root README "Secrets"; `NB_MANAGEMENT_URL=https://mesh.sapphic.world:443`):
    ```
-   printf 'NB_SETUP_KEY=%s\nNB_MANAGEMENT_URL=https://netbird.service.veronoi.cc:443\n' '<key>' |
+   printf 'NB_SETUP_KEY=%s\nNB_MANAGEMENT_URL=https://mesh.sapphic.world:443\n' '<key>' |
      sops --encrypt --filename-override secrets/ecstasy/netbird.env.sops \
        --input-type dotenv --output-type dotenv --output secrets/ecstasy/netbird.env.sops /dev/stdin
    ```
@@ -188,8 +188,8 @@ connector, and the local login is switched off**:
    `sops --decrypt --extract '["AUTHENTIK_NETBIRD_CLIENT_SECRET"]' --input-type dotenv --output-type dotenv secrets/coke/authentik.env.sops`
    (verified with the pinned sops 3.13.3: prints just the value).
 2. NetBird dashboard -> **Settings -> Identity Providers -> Add Identity Provider**: Type `Generic OIDC`, Name `Authentik`,
-   Client ID `netbird`, Client Secret = the value from step 1, Issuer `https://auth.service.veronoi.cc/application/o/netbird/`.
-   The redirect URL the dashboard shows is `https://netbird.service.veronoi.cc/oauth2/callback`; the Authentik blueprint (`apps/authentik`) already
+   Client ID `netbird`, Client Secret = the value from step 1, Issuer `https://auth.sapphic.world/application/o/netbird/`.
+   The redirect URL the dashboard shows is `https://mesh.sapphic.world/oauth2/callback`; the Authentik blueprint (`apps/authentik`) already
    contains exactly that (strict) plus the logout callback, so there is nothing to copy into Authentik. Click **Add Provider**.
 3. Switch the local email/password login off (only Authentik remains on the sign-in page), then commit, push and let `secrets-sync`
    restart the server:
@@ -204,7 +204,7 @@ connector, and the local login is switched off**:
 
 What happens to the old embedded-IdP login: with `localAuthDisabled: true` the `local` connector is removed at server start, existing
 local users stay in the database but cannot sign in; the dashboard's own OIDC client (`netbird-dashboard`, issuer
-`https://netbird.service.veronoi.cc/oauth2`) is unchanged.
+`https://mesh.sapphic.world/oauth2`) is unchanged.
 
 ## Backup
 
@@ -239,20 +239,32 @@ plain file changes); a change to `routes.yml` reloads Traefik.
 
 ## Renaming the NetBird host
 
-Historical: NetBird moved from `netbird.veronoi.cc` to `netbird.service.veronoi.cc` (Authentik from `auth.veronoi.cc` to `auth.service.veronoi.cc`). What a rename needs:
+History: NetBird moved from `netbird.veronoi.cc` to `netbird.service.veronoi.cc` (Authentik from `auth.veronoi.cc` to `auth.service.veronoi.cc`), and
+**latest** to `mesh.sapphic.world` (Authentik to `auth.sapphic.world`, Grafana to `graph.sapphic.world`; the `sapphic.world` zone has its own wildcard
+certificate and NetBird DNS zone, root README "Domain scheme"). The old NetBird and Authentik hosts stay served by temporary `*-legacy` routers
+(`apps/netbird/routes.yml`, `apps/authentik/routes.yml`) until every peer is re-pointed; the next change deletes them. What a rename needs:
 
 1. `secrets/ecstasy/netbird-server.yaml.sops`: `server.exposedAddress`, `server.auth.issuer` (`<new host>/oauth2`) and `server.dashboardRedirectURIs`; `dashboard.env`: the management/issuer URLs.
 2. Every client: `NB_MANAGEMENT_URL` in `secrets/<node>/netbird.env.sops`. The env var is **not** applied on a restart (the stored `ManagementURL` wins), so on each peer run
-   `netbird down` and `netbird up --management-url https://<new host>`; the client must also be restarted to pick up the new signal URL.
+   `netbird down` and `netbird up --management-url https://<new host>:443`; the client must also be restarted to pick up the new signal URL.
+   - ecstasy is reached over its public IP, so run these through `sudo podman exec netbird netbird ...` then `sudo systemctl restart netbird`.
+   - coke is reached over its own NetBird route, so the SSH session drops while it is down. Run the sequence detached and reconnect after ~90 s:
+     ```
+     ssh veronoicc@10.10.30.4 'sudo systemd-run --unit=netbird-repoint --collect /bin/sh -c "podman exec netbird netbird down; podman exec netbird netbird up --management-url https://<new host>:443; systemctl restart netbird"'
+     ```
+     If it does not come back, check `journalctl -u netbird-repoint` on coke locally.
+   - User-run peers (laptops, Home Assistant add-on): `netbird down`, `netbird up --management-url https://<new host>:443`.
 3. Authentik: the redirect URIs in `apps/authentik/netbird-blueprint.yaml` and `meta_launch_url`; the IdP issuer `https://<new auth host>/application/o/netbird/` in the dashboard (Identity Providers).
-4. The Dex connector stores its own `redirectURI` in `idp.db`; update it with the server **stopped**, after a backup:
+4. The Dex connector stores its own `redirectURI` **and** `issuer` in `idp.db`; update both in one statement with the server **stopped**, after a backup:
    ```
    sudo systemctl stop netbird-server
-   sudo podman volume export netbird-data > netbird-data-backup.tar
-   sudo podman run --rm --user 0 -v netbird-data:/d docker.io/keinos/sqlite3:latest sqlite3 /d/idp.db "update connector set config = cast(json_set(cast(config as text), '$.redirectURI', 'https://<new host>/oauth2/callback') as blob) where id = '<connector id>';"
+   sudo sh -c 'podman volume export netbird-data > /var/data/netbird-data-backup.tar'
+   sudo podman run --rm --user 0 -v netbird-data:/d docker.io/keinos/sqlite3:latest sqlite3 /d/idp.db "update connector set config = cast(json_set(cast(config as text), '$.redirectURI', 'https://<new host>/oauth2/callback', '$.issuer', 'https://<new auth host>/application/o/netbird/') as blob) where id = '<connector id>';"
    sudo systemctl start netbird-server
    ```
-   (`<connector id>`: `sqlite3 /d/idp.db "select id from connector;"` the same way.) Editing the IdP in the dashboard also needs a `netbird-server` restart to take effect.
+   (`<connector id>`: `sqlite3 /d/idp.db "select id, type from connector;"` the same way, the `oidc` row. Check afterwards with
+   `select json_extract(cast(config as text), '$.issuer'), json_extract(cast(config as text), '$.redirectURI') from connector where id = '<connector id>';`.)
+   Editing the IdP in the dashboard also needs a `netbird-server` restart to take effect.
 
 ## Security note
 

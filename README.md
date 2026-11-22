@@ -87,7 +87,7 @@ and exist as `apps/<name>/`, or the build fails. The line must be a single-line 
    drawn before the key existed). `scripts/node-key.sh <user>@<host>` fetches it over SSH for a node you can reach.
 3. `scripts/add-node.sh coke <key>` (registers it as a recipient).
 4. Give coke a NetBird setup key so it joins the mesh: `secrets/coke/netbird.env.sops`, same recipe as for ecstasy ([Secrets](#secrets-sops--age)).
-5. Create the Authentik secrets as in [`apps/authentik/README.md`](apps/authentik/README.md). Authentik's name is `auth.service.veronoi.cc` (covered by the `*.service` wildcard).
+5. Create the Authentik secrets as in [`apps/authentik/README.md`](apps/authentik/README.md). Authentik's name is `auth.sapphic.world` (covered by the `*.sapphic.world` wildcard).
 
 ## Secrets (SOPS + age)
 
@@ -157,7 +157,7 @@ If no listed file exists at all, `secrets-sync` logs one line and exits 0.
    ```
 5. Create the encrypted dotenv (tested with the pinned sops: the path only has to match `.sops.yaml`, `--filename-override` supplies it for stdin):
    ```
-   printf 'NB_SETUP_KEY=<key>\nNB_MANAGEMENT_URL=https://netbird.service.veronoi.cc:443\n' |
+   printf 'NB_SETUP_KEY=<key>\nNB_MANAGEMENT_URL=https://mesh.sapphic.world:443\n' |
      sops --encrypt --input-type dotenv --output-type dotenv \
        --filename-override secrets/ecstasy/netbird.env.sops /dev/stdin > secrets/ecstasy/netbird.env.sops
    ```
@@ -280,14 +280,14 @@ copy left on a node by an older `apps-sync` is removed quietly. Every other regu
 
 ## Self-hosted NetBird and Authentik
 
-NetBird control plane on ecstasy (`netbird.service.veronoi.cc`), Authentik on coke (`auth.service.veronoi.cc`; no inbound ports, reached by ecstasy's
+NetBird control plane on ecstasy (`mesh.sapphic.world`), Authentik on coke (`auth.sapphic.world`; no inbound ports, reached by ecstasy's
 Traefik over the NetBird mesh), shared Traefik: all declarative, nothing app-specific outside `apps/`. Setup, DNS/firewall, recipes,
 order of steps, backup and security notes: [`apps/netbird/README.md`](apps/netbird/README.md),
 [`apps/authentik/README.md`](apps/authentik/README.md), [`apps/traefik/README.md`](apps/traefik/README.md).
 The NetBird *client* (`netbird.container`, `NB_SETUP_KEY` from `secrets/<node>/netbird.env.sops`) is baked into the Ignition and is not an app.
 Paperless-ngx on coke (`paperless.service.veronoi.cc`, mesh only except public `/share/` links, login only via Authentik) is a service of the [domain scheme](#domain-scheme):
 [`apps/paperless/README.md`](apps/paperless/README.md) (setup order, first superuser, backup, route).
-Grafana and TimescaleDB on coke (`grafana.service.veronoi.cc`, mesh only except public-dashboard paths, login only via Authentik; the database on the mesh address, TCP 5432):
+Grafana and TimescaleDB on coke (`graph.sapphic.world`, mesh only except public-dashboard paths, login only via Authentik; the database on the mesh address, TCP 5432):
 [`apps/monitoring/README.md`](apps/monitoring/README.md) (topology, secrets, public dashboards and embedding).
 scanservjs on coke (`scan.service.veronoi.cc`, mesh only, no login of its own; web UI for the HP flatbed, scans go through the shared `paperless-consume` volume into Paperless):
 [`apps/scanservjs/README.md`](apps/scanservjs/README.md) (scanner config, ownership, printer quirks, NetBird policy, DHCP reservation).
@@ -303,7 +303,7 @@ Nodes installed before this carry the same line as a drop-in, to be recreated by
 # netavark masquerades packets with mark bit 0x2000 (nat POSTROUTING); the default NetBird marks 0x1bd2x contain it.
 Environment=NB_FWMARK_BASE=0x1000000
 ```
-then `sudo systemctl daemon-reload && sudo systemctl restart netbird.service`. Check: `curl https://netbird.service.veronoi.cc/?ipcheck=1`
+then `sudo systemctl daemon-reload && sudo systemctl restart netbird.service`. Check: `curl https://mesh.sapphic.world/?ipcheck=1`
 on ecstasy shows the real client IP in Traefik's log, not `172.30.0.1`.
 
 **Eager connections on nodes.** A route through another peer (coke -> printer via Home Assistant) only works while that routing peer is
@@ -364,7 +364,7 @@ no change to the Traefik node's `apps:`.
 - **Certificate:** one wildcard per zone from Let's Encrypt via DNS-01 (Cloudflare), resolver `letsencrypt-dns`. Only the wildcards show up in
   Certificate Transparency logs, never an individual service name. The Cloudflare token is sensitive: scope it to Zones `veronoi.cc` and
   `sapphic.world`, permission Zone:DNS:Edit only (steps: [`apps/traefik/README.md`](apps/traefik/README.md)).
-- **No exceptions:** NetBird and Authentik live at `netbird.service.veronoi.cc` / `auth.service.veronoi.cc`, fully public (`[websecure, mesh]`) like any other service host.
+- **No exceptions:** NetBird and Authentik live at `mesh.sapphic.world` / `auth.sapphic.world`, fully public (`[websecure, mesh]`) like any other service host.
   NetBird peers resolve the management name past the NetBird zone (the client caches the address it connected with), so a peer keeps reaching
   the server even though the zone answers the same name with the mesh IP.
 - **Real client IPs** in Traefik's log depend on the `NB_FWMARK_BASE` fix above (guarded by a test in `tests/test_build.py`); reachability does not.

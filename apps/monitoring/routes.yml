@@ -1,4 +1,4 @@
-# Traefik routes for grafana.service.veronoi.cc. Grafana runs on coke, which accepts no inbound connections: Traefik reaches it
+# Traefik routes for graph.sapphic.world. Grafana runs on coke, which accepts no inbound connections: Traefik reaches it
 # over the NetBird mesh at coke's mesh address. TimescaleDB is not routed at all (mesh address, TCP 5432, see README.md).
 # `grafana` (mesh peers, who resolve the name to ecstasy's mesh IP): the whole app, mesh entrypoint only.
 # `grafana-public` (internet): only what an anonymous viewer needs for a public dashboard, verified against grafana v13.3.1:
@@ -15,20 +15,20 @@
 http:
   routers:
     grafana:
-      rule: Host(`grafana.service.veronoi.cc`)
+      rule: Host(`graph.sapphic.world`)
       entryPoints: [mesh]
       tls:
         certResolver: letsencrypt-dns
         domains:
-          - main: "*.service.veronoi.cc"
+          - main: "*.sapphic.world"
       service: grafana
     grafana-public:
-      rule: Host(`grafana.service.veronoi.cc`) && (PathPrefix(`/public-dashboards/`) || PathPrefix(`/api/public/dashboards/`) || PathPrefix(`/public/`))
+      rule: Host(`graph.sapphic.world`) && (PathPrefix(`/public-dashboards/`) || PathPrefix(`/api/public/dashboards/`) || PathPrefix(`/public/`))
       entryPoints: [websecure]
       tls:
         certResolver: letsencrypt-dns
         domains:
-          - main: "*.service.veronoi.cc"
+          - main: "*.sapphic.world"
       service: grafana
   services:
     grafana:

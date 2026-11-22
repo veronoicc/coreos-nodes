@@ -388,7 +388,7 @@ def test_foreign_yaml_is_never_on_a_traefik_node():
 def test_netbird_routes():
     cfg = load_routes(APPS / "netbird" / "routes.yml")["http"]
     rt, sv = cfg["routers"], cfg["services"]
-    host = "netbird.service.veronoi.cc"
+    host = NB_HOST
     grpc = rt["netbird-grpc"]["rule"]
     assert f"Host(`{host}`)" in grpc
     for path in ("/signalexchange.SignalExchange/", "/management.ManagementService/"):
@@ -406,13 +406,20 @@ def test_netbird_routes():
 
 
 def test_netbird_routers_are_public_and_mesh():
-    """All three routers sit on netbird.service.veronoi.cc, public + mesh, wildcard certificate; nothing else is routed."""
+    """The three routers sit on mesh.sapphic.world, public + mesh, that zone's wildcard certificate; nothing else is routed.
+    TEMPORARY `-legacy` twins keep netbird.service.veronoi.cc served until every peer is re-pointed (Phase D deletes them)."""
     rt = load_routes(APPS / "netbird" / "routes.yml")["http"]["routers"]
-    assert set(rt) == {"netbird-grpc", "netbird-backend", "netbird-dashboard"}
+    base = {"netbird-grpc", "netbird-backend", "netbird-dashboard"}
+    assert set(rt) == base | {f"{n}-legacy" for n in base}
     for n, r in rt.items():
         assert r["entryPoints"] == ["websecure", "mesh"], n
-        assert re.findall(r"Host\(`([^`]+)`\)", r["rule"]) == ["netbird.service.veronoi.cc"], n
+        want = "netbird.service.veronoi.cc" if n.endswith("-legacy") else NB_HOST
+        assert re.findall(r"Host\(`([^`]+)`\)", r["rule"]) == [want], n
         check_router(n, r)
+    for n in base:
+        twin = rt[f"{n}-legacy"]
+        assert twin["rule"] == rt[n]["rule"].replace(NB_HOST, "netbird.service.veronoi.cc"), n
+        assert {k: v for k, v in twin.items() if k not in ("rule", "tls")} == {k: v for k, v in rt[n].items() if k not in ("rule", "tls")}, n
     check_mesh_coverage(rt)
 
 
@@ -441,7 +448,7 @@ def test_netbird_dashboard_env():
     d = parse_quadlet(APPS / "netbird" / "netbird-dashboard.container")["Container"]
     assert d["EnvironmentFile"] == ["/etc/containers/systemd/apps/netbird/dashboard.env"]
     env = env_file(APPS / "netbird" / "dashboard.env")
-    host = "https://netbird.service.veronoi.cc"
+    host = f"https://{NB_HOST}"
     assert env["NETBIRD_MGMT_API_ENDPOINT"] == host and env["NETBIRD_MGMT_GRPC_API_ENDPOINT"] == host
     assert env["AUTH_AUTHORITY"] == f"{host}/oauth2"  # the EMBEDDED issuer: it stays the primary IdP (README.md)
     assert env["USE_AUTH0"] == "false" and env["AUTH_CLIENT_SECRET"] == ""
@@ -483,11 +490,12 @@ def test_authentik_is_published_on_the_mesh_address_only():
     # the route on the node that owns the public IP points at the same address
     route = load_routes(APPS / "authentik" / "routes.yml")["http"]
     assert route["services"]["authentik"]["loadBalancer"]["servers"] == [{"url": f"http://{ip}:9000"}]
-    assert set(route["routers"]) == {"authentik"}
-    assert route["routers"]["authentik"]["rule"] == "Host(`auth.service.veronoi.cc`)"
-    assert route["routers"]["authentik"]["entryPoints"] == ["websecure", "mesh"]
-    assert route["routers"]["authentik"]["service"] == "authentik"
-    check_router("authentik", route["routers"]["authentik"])
+    assert set(route["routers"]) == {"authentik", "authentik-legacy"}  # -legacy: TEMPORARY old host, removed in Phase D
+    assert route["routers"]["authentik"]["rule"] == f"Host(`{AUTH_HOST}`)"
+    assert route["routers"]["authentik-legacy"]["rule"] == "Host(`auth.service.veronoi.cc`)"
+    for n, r in route["routers"].items():
+        assert r["entryPoints"] == ["websecure", "mesh"] and r["service"] == "authentik", n
+        check_router(n, r)
     # boot ordering: the client creates the mesh interface; retry forever until it exists
     u = parse_quadlet(APPS / "authentik" / "authentik-server.container")
     assert "netbird.service" in u["Unit"]["After"][0].split() and "netbird.service" in u["Unit"]["Wants"][0].split()
@@ -543,8 +551,8 @@ def test_authentik_blueprint():
     assert not isinstance(provider["signing_key"], str) and provider["signing_key"].tag == "Find"  # RS256 key: Dex verifies via JWKS
     # the redirect URIs are NetBird's embedded Dex callback and logout callback, strict
     assert {(r["matching_mode"], r["url"]) for r in provider["redirect_uris"]} == {
-        ("strict", "https://netbird.service.veronoi.cc/oauth2/callback"), ("strict", "https://netbird.service.veronoi.cc/oauth2/logout/callback")}
-    assert app["attrs"]["meta_launch_url"] == "https://netbird.service.veronoi.cc"
+        ("strict", f"https://{NB_HOST}/oauth2/callback"), ("strict", f"https://{NB_HOST}/oauth2/logout/callback")}
+    assert app["attrs"]["meta_launch_url"] == f"https://{NB_HOST}"
     assert app["identifiers"] == {"slug": "netbird"} and app["attrs"]["provider"].tag == "KeyOf"
     # every !Env variable is in the encrypted env file (README recipe) and in the worker's EnvironmentFile
     envs = {n.value for n in walk(doc) if isinstance(n, _Tag) and n.tag == "Env"}
@@ -596,7 +604,8 @@ def test_grafana_blueprint():
     assert provider["client_secret"].value == "AUTHENTIK_GRAFANA_CLIENT_SECRET"
     assert not isinstance(provider["signing_key"], str) and provider["signing_key"].tag == "Find"
     # Grafana's callback is /login/generic_oauth (pkg/api/api.go: r.Get("/login/:name", ...)), strict match
-    assert provider["redirect_uris"] == [{"matching_mode": "strict", "url": "https://grafana.service.veronoi.cc/login/generic_oauth"}]
+    assert provider["redirect_uris"] == [{"matching_mode": "strict", "url": f"https://{GRAFANA_HOST}/login/generic_oauth"}]
+    assert app["attrs"]["meta_launch_url"] == f"https://{GRAFANA_HOST}"
     # the profile scope carries preferred_username and the groups claim the role mapping reads
     assert [m.value[1] for m in provider["property_mappings"]] == [
         ["managed", f"goauthentik.io/providers/oauth2/scope-{s}"] for s in ("openid", "email", "profile")]
@@ -690,14 +699,14 @@ def test_paperless_settings():
     assert env["PAPERLESS_APPS"] == "allauth.socialaccount.providers.openid_connect"
     assert {env[k] for k in ("PAPERLESS_DISABLE_REGULAR_LOGIN", "PAPERLESS_REDIRECT_LOGIN_TO_SSO", "PAPERLESS_SOCIAL_AUTO_SIGNUP")} == {"true"}
     assert env["PAPERLESS_ACCOUNT_ALLOW_SIGNUPS"] == "false"
-    assert env["PAPERLESS_LOGOUT_REDIRECT_URL"] == "https://auth.service.veronoi.cc/application/o/paperless/end-session/"
+    assert env["PAPERLESS_LOGOUT_REDIRECT_URL"] == f"https://{AUTH_HOST}/application/o/paperless/end-session/"
     # scanservjs copies a finished PDF into the consume folder (not an atomic rename): wait for a stable size/mtime
     assert float(env["PAPERLESS_CONSUMER_STABILITY_DELAY"]) >= 5
 
 
 # -------------------------------------------------------------- monitoring
 
-GRAFANA_HOST = "grafana.service.veronoi.cc"
+GRAFANA_HOST = "graph.sapphic.world"
 # What an anonymous viewer needs for a public dashboard (grafana v13.3.1, see apps/monitoring/routes.yml for file:line)
 GRAFANA_PUBLIC_PREFIXES = ["/public-dashboards/", "/api/public/dashboards/", "/public/"]
 
@@ -764,8 +773,8 @@ def test_monitoring_grafana_unit_and_datasource():
 def test_monitoring_settings():
     env = env_file(APPS / "monitoring" / "settings.env")
     assert not [k for k in env if "PASSWORD" in k or k.endswith("SECRET")], "secrets only come from the rendered env file"
-    ak = "https://auth.service.veronoi.cc/application/o"
-    assert env["GF_SERVER_ROOT_URL"] == "https://grafana.service.veronoi.cc"
+    ak = f"https://{AUTH_HOST}/application/o"
+    assert env["GF_SERVER_ROOT_URL"] == f"https://{GRAFANA_HOST}"
     assert env["GF_AUTH_GENERIC_OAUTH_ENABLED"] == "true" and env["GF_AUTH_GENERIC_OAUTH_NAME"] == "Authentik"
     assert env["GF_AUTH_GENERIC_OAUTH_SCOPES"] == "openid profile email"
     assert env["GF_AUTH_GENERIC_OAUTH_AUTH_URL"] == f"{ak}/authorize/"
@@ -953,7 +962,7 @@ def test_netbird_recipe_round_trip(tmp_path, real_tools):
     work, cipher, plain = run_recipe(recipe, tmp_path, real_tools, "ecstasy", "secrets/ecstasy/netbird-server.yaml.sops")
     assert "authSecret: ENC[" in cipher and "encryptionKey: ENC[" in cipher
     cfg = yaml.safe_load(plain)["server"]
-    assert cfg["auth"]["issuer"] == "https://netbird.service.veronoi.cc/oauth2"  # embedded IdP stays: no startup dependency on Authentik
+    assert cfg["auth"]["issuer"] == f"https://{NB_HOST}/oauth2"  # embedded IdP stays: no startup dependency on Authentik
     # The recipe only runs on a fresh/reset install, where the server refuses localAuthDisabled: true until a non-local
     # connector exists: so it starts with false (local /setup), and a separate README command flips it once Authentik is added.
     assert cfg["auth"]["localAuthDisabled"] is False

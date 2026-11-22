@@ -253,7 +253,7 @@ def test_secrets_sync_renders_netbird_env_and_restarts_unit(vm, tmp_path, real_t
     shutil.copy(ROOT / "secrets" / "tools.version", src / "secrets" / "tools.version")
     shutil.copy(ROOT / "secrets" / "ecstasy" / "targets.conf", src / "secrets" / "ecstasy" / "targets.conf")
     plain = tmp_path / "plain.env"
-    plain.write_text(f"NB_SETUP_KEY={NB_KEY}\nNB_MANAGEMENT_URL=https://netbird.service.veronoi.cc\n")
+    plain.write_text(f"NB_SETUP_KEY={NB_KEY}\nNB_MANAGEMENT_URL=https://mesh.sapphic.world\n")
     subprocess.run(  # throwaway admin key + the VM's own public key as recipients; the VM's private key never leaves it
         [real_tools.sops, "--encrypt", "--age", f"{admin_pub},{pub}", "--input-type", "dotenv", "--output-type", "dotenv",
          "--output", src / "secrets" / "ecstasy" / "netbird.env.sops", plain],
@@ -263,7 +263,7 @@ def test_secrets_sync_renders_netbird_env_and_restarts_unit(vm, tmp_path, real_t
     r = ssh(*SYNC, check=False)
     assert r.returncode == 0, r.stderr
     assert ssh("sudo", "stat", "-c", "%a %U", "/var/data/secrets/netbird.env").stdout.strip() == "600 root"
-    assert ssh("sudo", "cat", "/var/data/secrets/netbird.env").stdout == f"NB_SETUP_KEY={NB_KEY}\nNB_MANAGEMENT_URL=https://netbird.service.veronoi.cc\n"
+    assert ssh("sudo", "cat", "/var/data/secrets/netbird.env").stdout == f"NB_SETUP_KEY={NB_KEY}\nNB_MANAGEMENT_URL=https://mesh.sapphic.world\n"
     show = ssh("systemctl", "show", "-p", "ConditionResult,ActiveState", "netbird.service").stdout
     assert "ConditionResult=yes" in show and "ActiveState=active" in show, show
     assert "netbird" in ssh("sudo", "podman", "ps", "--format", "{{.Names}}").stdout
@@ -274,8 +274,8 @@ def test_secrets_sync_renders_netbird_env_and_restarts_unit(vm, tmp_path, real_t
     assert "updated" not in r.stdout + r.stderr
 
 
-NB_HOST = "netbird.service.veronoi.cc"
-AUTH_HOST = "auth.service.veronoi.cc"
+NB_HOST = "mesh.sapphic.world"
+AUTH_HOST = "auth.sapphic.world"
 PAPERLESS_HOST = "paperless.service.veronoi.cc"
 NB_UNITS = ("netbird-server.service", "netbird-dashboard.service")
 BACKEND_UNITS = ("traefik.service", *NB_UNITS)

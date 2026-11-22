@@ -1,9 +1,37 @@
-# Traefik routes for netbird.service.veronoi.cc (public + mesh, wildcard certificate; loaded by apps/traefik, see its README).
+# Traefik routes for mesh.sapphic.world (public + mesh, wildcard certificate; loaded by apps/traefik, see its README).
 # Synced by apps-sync; no secrets here.
 # Paths per https://docs.netbird.io/selfhosted/external-reverse-proxy (combined container).
 http:
   routers:
     netbird-grpc:
+      rule: Host(`mesh.sapphic.world`) && (PathPrefix(`/signalexchange.SignalExchange/`) || PathPrefix(`/management.ManagementService/`))
+      entryPoints: [websecure, mesh]
+      tls:
+        certResolver: letsencrypt-dns
+        domains:
+          - main: "*.sapphic.world"
+      service: netbird-server-h2c
+      priority: 100
+    netbird-backend:
+      rule: Host(`mesh.sapphic.world`) && (PathPrefix(`/relay`) || PathPrefix(`/ws-proxy/`) || PathPrefix(`/api`) || PathPrefix(`/oauth2`))
+      entryPoints: [websecure, mesh]
+      tls:
+        certResolver: letsencrypt-dns
+        domains:
+          - main: "*.sapphic.world"
+      service: netbird-server
+      priority: 100
+    netbird-dashboard:
+      rule: Host(`mesh.sapphic.world`)
+      entryPoints: [websecure, mesh]
+      tls:
+        certResolver: letsencrypt-dns
+        domains:
+          - main: "*.sapphic.world"
+      service: netbird-dashboard
+      priority: 1
+    # TEMPORARY: old host until every peer is re-pointed (README "Renaming the NetBird host"); removed in the next step
+    netbird-grpc-legacy:
       rule: Host(`netbird.service.veronoi.cc`) && (PathPrefix(`/signalexchange.SignalExchange/`) || PathPrefix(`/management.ManagementService/`))
       entryPoints: [websecure, mesh]
       tls:
@@ -12,7 +40,7 @@ http:
           - main: "*.service.veronoi.cc"
       service: netbird-server-h2c
       priority: 100
-    netbird-backend:
+    netbird-backend-legacy:
       rule: Host(`netbird.service.veronoi.cc`) && (PathPrefix(`/relay`) || PathPrefix(`/ws-proxy/`) || PathPrefix(`/api`) || PathPrefix(`/oauth2`))
       entryPoints: [websecure, mesh]
       tls:
@@ -21,7 +49,7 @@ http:
           - main: "*.service.veronoi.cc"
       service: netbird-server
       priority: 100
-    netbird-dashboard:
+    netbird-dashboard-legacy:
       rule: Host(`netbird.service.veronoi.cc`)
       entryPoints: [websecure, mesh]
       tls:
