@@ -51,7 +51,7 @@ Three instance-wide runners `coke-runner-1..3` (Forgejo Runner 13.2.2), each pai
 | `forgejo-dind-<n>.container` | The **only privileged container** of the repo (a test enforces it). TLS on `2376`, hostname `forgejo-dind-<n>` is the certificate SAN. |
 | `forgejo-dind-<n>.volume`, `forgejo-dind-<n>-certs.volume` | Docker data root and the generated certificates (persistent). |
 | `runner.yml` | Shared config: capacity 1, labels `ubuntu-latest`/`ubuntu-24.04` (`ghcr.io/catthehacker/ubuntu:act-24.04`) and `docker` (`node:22-bookworm`), jobs capped at 2 CPUs / 2 GB. |
-| `runner-entry.sh` | Renders `uuid`/`token` into the config and execs `forgejo-runner daemon`. |
+| `runner-entry.sh` | Renders `uuid`/`token` into the config, waits until `<url>api/healthz` answers, then execs `forgejo-runner daemon`. The wait is needed because a runner that starts while Forgejo still returns an error (route not loaded yet) skips declaring its labels and polls with none forever, so no job ever matches. |
 
 - Registration is declarative, no token is ever created by hand: the shared 40-hex secret `FORGEJO_RUNNER_<n>_SECRET` is registered Forgejo-side by `forgejo-setup.sh`
   (`forgejo forgejo-cli actions register --name coke-runner-<n> --secret ... --keep-labels`) and used runner-side by `runner-entry.sh`: the token is the secret, the uuid is its first 16

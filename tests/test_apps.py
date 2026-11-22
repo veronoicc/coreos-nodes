@@ -1309,23 +1309,50 @@ def test_forgejo_runner_pairs(n):
                     "forgejo.service,forgejo-runner-1.service,forgejo-runner-2.service,forgejo-runner-3.service"]
 
 
-def test_forgejo_runner_entry_renders_connection(tmp_path):
+def run_runner_entry(tmp_path, fails=0, drop_secret=False):
+    """runner-entry.sh with fake forgejo-runner, wget (fails `fails` times first) and sleep on PATH; returns (result, log lines)."""
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    (bin_dir / "forgejo-runner").write_text('#!/bin/sh\necho "$*"\ncat "$2"\n')
-    (bin_dir / "forgejo-runner").chmod(0o755)
+    bin_dir.mkdir(exist_ok=True)
+    log = tmp_path / "log"
+    log.write_text("")
+    (tmp_path / "n").write_text("0")
+    fakes = {
+        "forgejo-runner": 'echo "runner $*" >> "$LOG"\necho "$*"\ncat "$2"\n',
+        "wget": 'echo "wget $*" >> "$LOG"\nn=$(($(cat "$COUNT") + 1))\necho $n > "$COUNT"\n[ "$n" -gt "$FAILS" ]\n',
+        "sleep": 'echo "sleep $*" >> "$LOG"\n',
+    }
+    for name, body in fakes.items():
+        (bin_dir / name).write_text("#!/bin/sh\n" + body)
+        (bin_dir / name).chmod(0o755)
     secret = "7c31591e8b67225a116d4a4519ea8e507e08f71f"  # the Forgejo offline-registration docs example
-    env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "TMPDIR": str(tmp_path), "RUNNER_INDEX": "2", "FORGEJO_RUNNER_2_SECRET": secret}
+    env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "TMPDIR": str(tmp_path), "RUNNER_INDEX": "2", "LOG": str(log),
+           "COUNT": str(tmp_path / "n"), "FAILS": str(fails), "FORGEJO_RUNNER_2_SECRET": secret}
+    if drop_secret:
+        del env["FORGEJO_RUNNER_2_SECRET"]
     cmd = ["sh", str(APPS / "forgejo" / "runner-entry.sh"), str(APPS / "forgejo" / "runner.yml")]
-    r = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    return subprocess.run(cmd, env=env, capture_output=True, text=True), log.read_text().splitlines(), secret
+
+
+def test_forgejo_runner_entry_renders_connection(tmp_path):
+    r, log, secret = run_runner_entry(tmp_path)
     assert r.returncode == 0, r.stderr
     assert r.stdout.splitlines()[0] == f"--config {tmp_path}/runner.yml daemon"
     assert 'uuid: "37633331-3539-3165-3862-363732323561"' in r.stdout and f'token: "{secret}"' in r.stdout
     assert "@UUID@" not in r.stdout and "@TOKEN@" not in r.stdout
     cfg = yaml.safe_load((tmp_path / "runner.yml").read_text())
     assert cfg["server"]["connections"]["forgejo"]["url"] == f"https://{FORGEJO_HOST}/"
-    del env["FORGEJO_RUNNER_2_SECRET"]
-    assert subprocess.run(cmd, env=env, capture_output=True, text=True).returncode != 0
+    r, _, _ = run_runner_entry(tmp_path, drop_secret=True)
+    assert r.returncode != 0
+
+
+def test_forgejo_runner_waits_for_forgejo_before_the_daemon(tmp_path):
+    """A runner that starts while Forgejo answers 404 skips declaring its labels and polls with none forever, so the daemon
+    must only start once <url>api/healthz succeeds (busybox wget: the runner image is Alpine without curl)."""
+    probe = f"wget -q -O /dev/null https://{FORGEJO_HOST}/api/healthz"
+    r, log, _ = run_runner_entry(tmp_path, fails=2)
+    assert r.returncode == 0, r.stderr
+    assert log == [probe, "sleep 5", probe, "sleep 5", probe, f"runner --config {tmp_path}/runner.yml daemon"]
+    assert r.stdout.count(f"waiting for https://{FORGEJO_HOST}/api/healthz") == 1  # one line, not one per probe
 
 
 def test_forgejo_runner_config():
