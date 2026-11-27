@@ -697,6 +697,8 @@ def test_uptime_kuma_blueprint():
     outpost = entry("authentik_outposts.outpost")  # the embedded outpost (inside authentik-server) serves the forward auth
     assert outpost["identifiers"] == {"managed": "goauthentik.io/outposts/embedded"}
     assert [(p.tag, p.value) for p in outpost["attrs"]["providers"]] == [("KeyOf", "uptime-kuma-provider")]
+    # the outpost redirects browsers to authentik_host; it was stored once as the retired auth.veronoi.cc, so the blueprint pins it
+    assert outpost["attrs"]["config"]["authentik_host"] == f"https://{AUTH_HOST}"
     assert not [n for n in walk(doc) if isinstance(n, _Tag) and n.tag == "Env"]  # no secret: nothing to render
     worker = parse_quadlet(APPS / "authentik" / "authentik-worker.container")
     assert "uptime-kuma-blueprint.yaml:/blueprints/custom/uptime-kuma.yaml:ro,z" in "".join(worker["Container"]["Volume"])

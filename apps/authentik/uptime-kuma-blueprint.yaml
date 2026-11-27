@@ -2,7 +2,9 @@
 # OIDC, so Authentik's embedded outpost (inside authentik-server) authenticates the admin UI through Traefik's forwardAuth
 # middleware `authentik-forward-auth` (apps/authentik/routes.yml); the routes are in apps/uptime-kuma/routes.yml.
 # Mounted into the worker as /blueprints/custom/uptime-kuma.yaml; nothing secret.
-# The `providers` list of the embedded outpost is REPLACED on every apply: add any future proxy provider here, not in the UI.
+# The `providers` list and `config` of the embedded outpost are REPLACED on every apply: add any future proxy provider or
+# outpost setting here, not in the UI. `config` is the outpost's full stored config (authentik 2026.8.5) with authentik_host
+# fixed: it was saved once as the retired https://auth.veronoi.cc, and the outpost sends browsers to it for login.
 version: 1
 metadata:
   name: Uptime Kuma
@@ -35,3 +37,27 @@ entries:
     attrs:
       providers:
         - !KeyOf uptime-kuma-provider
+      config:
+        authentik_host: https://auth.sapphic.world
+        authentik_host_insecure: false
+        authentik_host_browser: ""
+        log_level: info
+        object_naming_template: ak-outpost-%(name)s
+        refresh_interval: minutes=5
+        docker_labels: null
+        docker_network: null
+        docker_map_ports: true
+        container_image: null
+        kubernetes_replicas: 1
+        kubernetes_namespace: default
+        kubernetes_json_patches: null
+        kubernetes_service_type: ClusterIP
+        kubernetes_ingress_path_type: null
+        kubernetes_image_pull_secrets: []
+        kubernetes_ingress_class_name: null
+        kubernetes_disable_x509_strict: false
+        kubernetes_disabled_components: []
+        kubernetes_ingress_annotations: {}
+        kubernetes_ingress_secret_name: authentik-outpost-tls
+        kubernetes_httproute_annotations: {}
+        kubernetes_httproute_parent_refs: []
