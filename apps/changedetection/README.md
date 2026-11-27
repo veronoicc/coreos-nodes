@@ -50,6 +50,8 @@ Check: from a mesh peer that is not ecstasy, `curl -m 5 http://100.127.197.215:5
   `PLAYWRIGHT_DRIVER_URL` puts it back (query flags are appended to Chrome's command line). Checked locally: `navigator.webdriver` is `false`, UA has no `HeadlessChrome`.
 - `MAX_CONCURRENT_CHROME_PROCESSES` (default 10) caps parallel browsers and the rest queue; changedetection's `FETCH_WORKERS` defaults to 10. To limit it, add
   `Environment=MAX_CONCURRENT_CHROME_PROCESSES=<n>` to `changedetection-browser.container`.
+- `CHROME_DISABLE_WEB_SECURITY=false`: the image default switches off Chrome's cross-origin rules, which would let a watched page's script read
+  changedetection itself (no password, same network) and anything else coke reaches.
 - No JS evasions. It does not get past Cloudflare Turnstile or DataDome, which need a patched paid browser or a residential proxy (per-watch proxies:
   changedetection's proxy settings).
 

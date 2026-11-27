@@ -1113,6 +1113,8 @@ def test_changedetection_units():
     # headful sockpuppetbrowser drops this flag itself, leaving navigator.webdriver=true; the query string puts it back
     assert "PLAYWRIGHT_DRIVER_URL=ws://changedetection-browser:3000?--disable-blink-features=AutomationControlled" in app["Container"]["Environment"]
     assert "CHROME_HEADFUL=true" in browser["Container"]["Environment"]
+    # otherwise a watched page's script could read and drive the password-less changedetection from inside the network
+    assert "CHROME_DISABLE_WEB_SECURITY=false" in browser["Container"]["Environment"]
     assert app["Container"]["Volume"] == ["changedetection-data.volume:/datastore"]
     assert "changedetection" in NODES["coke"] and "changedetection" not in NODES["ecstasy"]
 

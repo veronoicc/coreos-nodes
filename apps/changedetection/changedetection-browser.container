@@ -16,6 +16,9 @@ Environment=SCREEN_WIDTH=1920
 Environment=SCREEN_HEIGHT=1080
 # The image default DEBUG logs every CDP command.
 Environment=LOG_LEVEL=INFO
+# The image default adds --disable-web-security: a watched page's script could then read any host Chrome reaches, including
+# changedetection itself (no password) on this network. Keep Chrome's cross-origin rules on.
+Environment=CHROME_DISABLE_WEB_SECURITY=false
 
 [Service]
 Restart=on-failure

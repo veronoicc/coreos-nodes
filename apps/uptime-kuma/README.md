@@ -94,7 +94,7 @@ State: `uptime-kuma-data`. Stop `uptime-kuma`, `sudo podman volume export uptime
 - `up{service_name="uptime-kuma"} == 0`: Kuma's auth is not disabled yet, so `/metrics` answers 401.
 - Authentik redirect loop or redirect to a wrong host: the embedded outpost sends browsers to its `authentik_host`, pinned to `https://auth.sapphic.world` by the
   `config` in `apps/authentik/uptime-kuma-blueprint.yaml` (it was once stored as the retired `auth.veronoi.cc`). Check the worker log for the blueprint apply.
-- The blueprint fails on the outpost entry (worker log shows "Serializer errors"): assign "Uptime Kuma" to the embedded outpost in the UI instead and delete the
-  `authentik_outposts.outpost` entry from the blueprint.
+- The blueprint fails on the outpost entry (worker log shows "Serializer errors"): assign "Uptime Kuma" and "changedetection.io" to the embedded outpost in the
+  UI instead and delete the `authentik_outposts.outpost` and `authentik_blueprints.metaapplyblueprint` entries from the blueprint.
 - coke down: the status page keeps working (and the admin UI's login does not, Authentik runs on coke); the collector retries its push for about 5 minutes, then drops the data.
 - `uptime-kuma.env` missing: the collector is skipped (`ConditionResult=no`); `journalctl -u secrets-sync` tells why.
