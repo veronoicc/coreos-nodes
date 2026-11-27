@@ -6,7 +6,7 @@ Wants=network-online.target netbird.service
 After=network-online.target netbird.service
 RequiresMountsFor=/var/data
 # /var/data/secrets/monitoring.env is rendered by secrets-sync (secrets/coke/monitoring.env.sops); until then the unit is skipped
-# instead of crash-looping, and secrets-sync restarts both monitoring units when it appears or changes.
+# instead of crash-looping, and secrets-sync restarts the monitoring units when it appears or changes.
 ConditionPathExists=/var/data/secrets/monitoring.env
 # Retry forever: after a reboot the mesh address appears some seconds after the client started.
 StartLimitIntervalSec=0

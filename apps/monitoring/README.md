@@ -1,4 +1,4 @@
-# Monitoring (TimescaleDB + Grafana, mesh + public dashboards, login via Authentik)
+# Monitoring (TimescaleDB + Grafana + VictoriaMetrics, mesh + public dashboards, login via Authentik)
 
 TimescaleDB 2.32 (PostgreSQL 17) and Grafana 13.3 OSS on **coke** (`apps: [authentik, paperless, monitoring]` in `nodes/coke.yml`).
 Grafana is at `https://graph.sapphic.world` from the **mesh** (split DNS, domain scheme: root [README](../../README.md), Domain scheme); the
@@ -16,12 +16,12 @@ browser --443--> ecstasy: Traefik `mesh` (whole app) or `websecure` (only the pu
 mesh device --psql-->   coke: timescaledb published on 100.127.197.215:5432  (not routed by Traefik)
 ```
 
-- Both containers publish **only on coke's mesh address** (`PublishPort=100.127.197.215:...`), never `0.0.0.0`. Like `authentik-server` they are ordered after the baked
+- All three containers publish **only on coke's mesh address** (`PublishPort=100.127.197.215:...`), never `0.0.0.0`. Like `authentik-server` they are ordered after the baked
   `netbird.service` and retried forever until the mesh interface exists. The Grafana address is the backend in [`routes.yml`](routes.yml) (a test checks they match).
 - `grafana` reaches the database as `timescaledb:5432` on the private `monitoring.network` (provisioned datasource, role `grafana`, read-only).
-- Both containers read `/var/data/secrets/monitoring.env` through `[Container] EnvironmentFile` (so each also sees the other's keys; the file is root-only 0600) and are
-  gated on it (`ConditionPathExists`): before the first render they are skipped, afterwards `secrets-sync` restarts both when it changes.
-- Volumes `timescaledb-data` and `grafana-data` are `# apps-sync: keep`: `apps-sync reset monitoring` keeps them, only `reset --include-persistent monitoring` wipes them.
+- All three containers read `/var/data/secrets/monitoring.env` through `[Container] EnvironmentFile` (so each also sees the others' keys; the file is root-only 0600) and are
+  gated on it (`ConditionPathExists`): before the first render they are skipped, afterwards `secrets-sync` restarts all three when it changes.
+- Volumes `timescaledb-data`, `grafana-data` and `victoriametrics-data` are `# apps-sync: keep`: `apps-sync reset monitoring` keeps them, only `reset --include-persistent monitoring` wipes them.
 
 | File | Content |
 |---|---|
@@ -110,8 +110,8 @@ whoever has the token can view that dashboard's data, revoke by pausing/deleting
 | 1 | Cloudflare / NetBird | Nothing per service: the `*.sapphic.world` records of the domain scheme already cover `graph.sapphic.world`. |
 | 2 | NetBird | Policy: TCP 5432 from your devices to coke (above); nothing needed for 3000, Traefik on ecstasy already reaches coke. |
 | 3 | git | Merge. `secrets/coke/monitoring.env.sops` and `secrets/coke/authentik-grafana.env.sops` are already encrypted (to your admin key and coke's key). |
-| 4 | coke | `sudo systemctl start secrets-sync apps-sync` (or wait up to 15/10 min). The Authentik worker is gated on `authentik-grafana.env` and restarts once when it appears, then applies the blueprint; both monitoring containers start. |
-| 5 | browser | `https://graph.sapphic.world` from a mesh peer: redirected to Authentik, log in as an `authentik Admins` member. The datasource `TimescaleDB` is provisioned. |
+| 4 | coke | `sudo systemctl start secrets-sync apps-sync` (or wait up to 15/10 min). The Authentik worker is gated on `authentik-grafana.env` and restarts once when it appears, then applies the blueprint; the three monitoring containers start. |
+| 5 | browser | `https://graph.sapphic.world` from a mesh peer: redirected to Authentik, log in as an `authentik Admins` member. The datasources `TimescaleDB` (default) and `VictoriaMetrics` are provisioned. |
 
 The OIDC client secret exists in two encrypted files, byte-identical: `authentik-grafana.env.sops` (`AUTHENTIK_GRAFANA_CLIENT_SECRET`, Authentik worker's blueprint via `!Env`) and
 `monitoring.env.sops` (`GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET`). To rotate it, generate a new value and re-encrypt **both** files with `sops secrets/coke/<file>.sops` (needs your admin key), push.
@@ -134,9 +134,9 @@ minor bump (read the upstream release notes first, back up before). Grafana migr
 ## Failure modes
 
 - Mesh or ecstasy down: the URL times out/answers `502`; the containers keep running. A mesh device without the NetBird policy cannot reach `5432`.
-- coke rebooted: both units wait for the mesh interface and retry every 10 s (`StartLimitIntervalSec=0`).
+- coke rebooted: the units wait for the mesh interface and retry every 10 s (`StartLimitIntervalSec=0`).
 - Authentik "redirect_uri mismatch": the callback must be exactly `https://graph.sapphic.world/login/generic_oauth` (`GF_SERVER_ROOT_URL`).
 - Login refused with "role attribute strict": the user is not in `authentik Admins` or the `groups` claim is missing (check the `profile` scope on the provider).
 - Authentik invalid-client error: the client secret differs between the two encrypted files; align and re-encrypt both.
 - Grafana datasource "password authentication failed": `GRAFANA_DB_PASSWORD` changed after the first start, see the initdb note above.
-- `monitoring.env` missing: both units are skipped (`ConditionResult=no`); `journalctl -u secrets-sync` tells why.
+- `monitoring.env` missing: all three units are skipped (`ConditionResult=no`); `journalctl -u secrets-sync` tells why.
