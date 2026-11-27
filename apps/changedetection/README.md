@@ -1,47 +1,50 @@
 # changedetection.io (changedetection.sapphic.world: mesh only, login via Authentik, headful Chrome fetcher)
 
 changedetection.io 0.70.4 on **coke** (`apps: [..., changedetection]` in `nodes/coke.yml`), with sockpuppetbrowser 0.0.5 as its Playwright/JavaScript
-fetcher. **Mesh-only** behind Authentik forward auth: changedetection's own password stays off, so the Authentik login is the only one. Declarative:
-Quadlets and routes via `apps-sync`; nothing secret. Generic mechanics: root README.
+fetcher. **Mesh-only**, behind Authentik's embedded outpost in **proxy mode**: changedetection's own password stays off and it publishes no port, so the
+Authentik login is the only way in. No NetBird policy is needed for that. Declarative: Quadlets and routes via `apps-sync`; nothing secret. Generic mechanics: root README.
 
 ## Topology
 
 ```
-mesh --443--> ecstasy: Traefik `mesh` -- forwardAuth --> coke 100.127.197.215:9000 (Authentik embedded outpost)
-                                      \-- authenticated --> coke 100.127.197.215:5000 changedetection
-coke: changedetection --CDP ws://changedetection-browser:3000 (changedetection.network)--> changedetection-browser
+mesh --443--> ecstasy: Traefik `mesh` --> coke 100.127.197.215:9000 authentik-server (embedded outpost: login, then reverse proxy)
+coke: authentik-server --http://changedetection:5000 (authentik.network)--> changedetection
+      changedetection --CDP ws://changedetection-browser:3000 (changedetection.network)--> changedetection-browser
       changedetection-browser: one headful Google Chrome per check --> internet
 ```
 
-- Only `changedetection` publishes a port, and only on coke's mesh address. `routes.yml` carries the same address (a test checks they match).
-- `changedetection-browser` publishes nothing: its CDP endpoint (3000) and `/stats` (8080) have no auth.
-- The forward-auth middleware `authentik-forward-auth` and the service `authentik` live in [`apps/authentik/routes.yml`](../authentik/routes.yml); Traefik's file provider merges all route files.
+- Neither container publishes a port. changedetection is on two networks: `changedetection.network` (with its browser) and `authentik.network`, where
+  authentik-server reaches it by container name (`internal_host` in the blueprint; a test checks it matches `ContainerName`).
+- The browser is only on `changedetection.network`: its CDP endpoint (3000) and `/stats` (8080) have no auth, and the untrusted page script it runs must not reach Authentik.
+  The reverse direction (authentik-server joining `changedetection.network`) is deliberately not used for that reason.
+- On `authentik.network` changedetection can also open connections to `authentik-postgres`, which still requires its password.
+- The service `authentik` lives in [`apps/authentik/routes.yml`](../authentik/routes.yml); Traefik's file provider merges all route files.
+- The outpost passes `Host`, `X-Forwarded-Host` and Traefik's `X-Forwarded-Proto: https` through (authentik 2026.8.5 `internal/outpost/proxyv2/application/mode_proxy.go`,
+  `internal/web/proxy.go`), so changedetection's same-origin check for its Socket.IO live updates passes, and Go's reverse proxy carries the WebSocket upgrade.
 
 | File | Content |
 |---|---|
-| `changedetection.container` | `docker.io/dgtlmoon/changedetection.io:0.70.4`, `PublishPort=100.127.197.215:5000:5000`, `PLAYWRIGHT_DRIVER_URL=ws://changedetection-browser:3000?--disable-blink-features=AutomationControlled`, `DISABLE_VERSION_CHECK=true`, data volume. |
+| `changedetection.container` | `docker.io/dgtlmoon/changedetection.io:0.70.4`, networks `changedetection.network` + `authentik.network`, no published port, `PLAYWRIGHT_DRIVER_URL=ws://changedetection-browser:3000?--disable-blink-features=AutomationControlled`, `DISABLE_VERSION_CHECK=true`, data volume. |
 | `changedetection-browser.container` | `docker.io/dgtlmoon/sockpuppetbrowser:0.0.5`, `CHROME_HEADFUL=true`, 1920x1080, `LOG_LEVEL=INFO`, no published port. |
 | `changedetection.network` | Private network of the two containers. |
 | `changedetection-data.volume` | `/datastore`: watches, history snapshots, screenshots, settings. `# apps-sync: keep`. |
-| `routes.yml` | The two Traefik routers (below). |
+| `routes.yml` | The Traefik router (below). |
 | `README.md` | This file. |
-| [`apps/authentik/changedetection-blueprint.yaml`](../authentik/changedetection-blueprint.yaml) | Proxy provider `changedetection.io` (`forward_single`, external host `https://changedetection.sapphic.world`), application `changedetection`, binding to `authentik Admins`. The embedded outpost entry in `uptime-kuma-blueprint.yaml` applies this blueprint first and assigns the provider. |
+| [`apps/authentik/changedetection-blueprint.yaml`](../authentik/changedetection-blueprint.yaml) | Proxy provider `changedetection.io` (`proxy` mode, external host `https://changedetection.sapphic.world`, internal host `http://changedetection:5000`), application `changedetection`, binding to `authentik Admins`. The embedded outpost entry in `uptime-kuma-blueprint.yaml` applies this blueprint first and assigns the provider. |
 
 ## Routes
 
-- `changedetection`: `Host(changedetection.sapphic.world)` on `[mesh]` with `authentik-forward-auth`: the whole app, only after an Authentik login.
-- `changedetection-outpost`: `/outpost.goauthentik.io/` on the same host, `[mesh]`, to Authentik (the outpost's sign-in callback).
+- `changedetection`: `Host(changedetection.sapphic.world)` on `[mesh]` to the service `authentik`, no middleware. The embedded outpost matches the host
+  to the provider, handles `/outpost.goauthentik.io/` (sign-in callback) itself and proxies everything else to changedetection after the login.
 
 ## Setup order (your steps)
 
-1. **NetBird policy: only ecstasy may reach coke `tcp/5000`.** NetBird policies only allow traffic, so if any policy (e.g. the default All -> All) lets other
-   peers reach coke, they skip Authentik on `http://100.127.197.215:5000`. Replace it with explicit policies.
-2. Merge, push, then on coke and ecstasy run `sudo systemctl start apps-sync` (the Authentik containers restart once because their blueprint files changed).
-3. From a mesh peer, open `https://changedetection.sapphic.world`. It redirects to Authentik (`authentik Admins` only). Never set a password in changedetection's Settings.
-4. Settings -> Fetching: choose "Playwright Chromium/Javascript" as the default fetch method, or pick it per watch.
+1. Merge, push, then on coke and ecstasy run `sudo systemctl start apps-sync` (the Authentik containers restart once because their blueprint files changed).
+2. From a mesh peer, open `https://changedetection.sapphic.world`. It redirects to Authentik (`authentik Admins` only). Never set a password in changedetection's Settings.
+3. Settings -> Fetching: choose "Playwright Chromium/Javascript" as the default fetch method, or pick it per watch.
 
-Check: from a mesh peer that is not ecstasy, `curl -m 5 http://100.127.197.215:5000/` times out. On ecstasy,
-`curl -s -o /dev/null -w '%{http_code}\n' http://100.127.197.215:5000/` prints `200`.
+Check: from any mesh peer, `curl -s -o /dev/null -w '%{http_code}\n' https://changedetection.sapphic.world/` prints `302` (redirect to Authentik), and
+`curl -m 5 http://100.127.197.215:5000/` is refused (nothing listens there). On coke, `sudo podman port changedetection` prints nothing.
 
 ## Browser
 
@@ -67,3 +70,9 @@ State: `changedetection-data`. Stop `changedetection`, `sudo podman volume expor
   before the new blueprint was discovered: `sudo systemctl restart authentik-worker` on coke; the hourly re-apply also fixes it. Kuma's outpost assignment stays,
   the failed apply is rolled back.
 - coke down: the UI is unreachable and no checks run.
+- Authentik down (or the `authentik` app removed from coke): the UI is unreachable; checks keep running. changedetection needs `authentik.network`, so
+  with the Authentik app removed it does not start at all.
+- `502` from the outpost after logging in: changedetection is not running, or not on `authentik.network` (`sudo podman inspect changedetection --format '{{json .NetworkSettings.Networks}}'`).
+- Socket.IO live updates fail (UI does not refresh, browser console shows a 400 on `/socket.io/`): python-engineio's same-origin check compares the `Origin`
+  with `X-Forwarded-Proto`/`X-Forwarded-Host`, so one of them no longer reaches changedetection as `https`/`changedetection.sapphic.world` (e.g. after an
+  Authentik upgrade changed `mode_proxy.go`). Workaround: `Environment=SOCKETIO_CORS_ORIGINS=https://changedetection.sapphic.world` in `changedetection.container`.

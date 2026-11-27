@@ -1,7 +1,8 @@
-# Authentik blueprint: forward-auth proxy provider + application for changedetection.io (changedetection.sapphic.world).
+# Authentik blueprint: proxy provider (proxy mode) + application for changedetection.io (changedetection.sapphic.world).
 # changedetection.io has no OIDC and its own password stays off, so Authentik's embedded outpost (inside authentik-server)
-# is its only login, through Traefik's forwardAuth middleware `authentik-forward-auth` (apps/authentik/routes.yml); the
-# routes are in apps/changedetection/routes.yml. Mounted into the worker as /blueprints/custom/changedetection.yaml; nothing secret.
+# is its only login AND its reverse proxy: Traefik sends the whole host to authentik-server (apps/changedetection/routes.yml),
+# the outpost logs the user in and proxies to internal_host over authentik.network. changedetection publishes no port, so
+# nothing can skip the login. Mounted into the worker as /blueprints/custom/changedetection.yaml; nothing secret.
 # No outpost entry here: the embedded outpost's providers list is replaced on every apply, so it is owned by
 # uptime-kuma-blueprint.yaml, which applies this blueprint first and finds the provider by its name.
 version: 1
@@ -15,8 +16,10 @@ entries:
     attrs:
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
       invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
-      mode: forward_single
+      mode: proxy
       external_host: https://changedetection.sapphic.world
+      # ContainerName of apps/changedetection/changedetection.container, resolved on authentik.network (a test checks it).
+      internal_host: http://changedetection:5000
   - model: authentik_core.application
     identifiers:
       slug: changedetection

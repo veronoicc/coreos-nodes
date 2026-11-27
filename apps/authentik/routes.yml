@@ -20,9 +20,9 @@ http:
           - url: http://100.127.197.215:9000
   middlewares:
     # Forward auth through Authentik's embedded outpost (part of authentik-server, path /outpost.goauthentik.io/). Used by
-    # apps/uptime-kuma/routes.yml and apps/changedetection/routes.yml; the proxy providers are in uptime-kuma-blueprint.yaml and
-    # changedetection-blueprint.yaml. trustForwardHeader passes Traefik's X-Forwarded-Host/-Uri/-Proto on, which the outpost
-    # uses to pick the provider and build the redirect.
+    # apps/uptime-kuma/routes.yml; the proxy provider is uptime-kuma-blueprint.yaml. trustForwardHeader passes Traefik's
+    # X-Forwarded-Host/-Uri/-Proto on, which the outpost uses to pick the provider and build the redirect. (changedetection uses
+    # the outpost in proxy mode instead: its router sends the whole host to the `authentik` service above.)
     authentik-forward-auth:
       forwardAuth:
         address: http://100.127.197.215:9000/outpost.goauthentik.io/auth/traefik

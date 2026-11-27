@@ -697,9 +697,9 @@ def test_uptime_kuma_blueprint():
     binding = entry("authentik_policies.policybinding")
     assert binding["identifiers"]["target"].value == ["authentik_core.application", ["slug", "uptime-kuma"]]
     assert binding["attrs"]["group"].value == ["authentik_core.group", ["name", "authentik Admins"]]
-    outpost = entry("authentik_outposts.outpost")  # the embedded outpost (inside authentik-server) serves the forward auth
+    outpost = entry("authentik_outposts.outpost")  # the embedded outpost (inside authentik-server): forward auth and proxy mode
     assert outpost["identifiers"] == {"managed": "goauthentik.io/outposts/embedded"}
-    # one embedded outpost entry serves every forward-auth app (its providers list is replaced on each apply)
+    # one embedded outpost entry serves every app behind it (its providers list is replaced on each apply)
     assert [(p.tag, p.value) for p in outpost["attrs"]["providers"]] == [
         ("KeyOf", "uptime-kuma-provider"),
         ("Find", ["authentik_providers_proxy.proxyprovider", ["name", "changedetection.io"]]),
@@ -723,7 +723,10 @@ def test_changedetection_blueprint():
     entry = lambda m: next(e for e in doc["entries"] if e["model"] == m)  # noqa: E731
     provider = entry("authentik_providers_proxy.proxyprovider")
     assert provider["id"] == "changedetection-provider" and provider["identifiers"] == {"name": "changedetection.io"}
-    assert provider["attrs"]["mode"] == "forward_single" and provider["attrs"]["external_host"] == f"https://{CD_HOST}"
+    # proxy mode: the outpost inside authentik-server is the reverse proxy, so changedetection publishes no port at all
+    assert provider["attrs"]["mode"] == "proxy" and provider["attrs"]["external_host"] == f"https://{CD_HOST}"
+    cd = containers("changedetection")["changedetection"]
+    assert provider["attrs"]["internal_host"] == f"http://{cd['Container']['ContainerName'][0]}:5000"
     assert provider["attrs"]["authorization_flow"].value == ["authentik_flows.flow", ["slug", "default-provider-authorization-implicit-consent"]]
     app = entry("authentik_core.application")
     assert app["identifiers"] == {"slug": "changedetection"}
@@ -1097,17 +1100,13 @@ def test_uptime_kuma_routes():
 def test_changedetection_units():
     cs = containers("changedetection")
     assert set(cs) == {"changedetection", "changedetection-browser"}
-    for q in cs.values():
-        assert q["Container"]["Network"] == ["changedetection.network"]
+    # authentik.network: authentik-server's embedded outpost proxies to it by container name. Not the other way round
+    # (authentik-server on changedetection.network), which would let the browser running untrusted page script reach Authentik.
+    assert cs["changedetection"]["Container"]["Network"] == ["changedetection.network", "authentik.network"]
+    assert cs["changedetection-browser"]["Container"]["Network"] == ["changedetection.network"]
     app, browser = cs["changedetection"], cs["changedetection-browser"]
-    publish = app["Container"]["PublishPort"]
-    assert len(publish) == 1, publish
-    ip, host_port, container_port = publish[0].split(":")
-    authentik_ip = containers("authentik")["authentik-server"]["Container"]["PublishPort"][0].split(":")[0]
-    assert ipaddress.ip_address(ip) in MESH and ip == authentik_ip, f"{ip} must be coke's mesh address, never 0.0.0.0"
-    assert container_port == "5000" and host_port not in {"9000", "3000", "3001", "2222", "5432", "8428", "8000", "8081"}
-    assert "netbird.service" in app["Unit"]["After"][0].split() and "netbird.service" in app["Unit"]["Wants"][0].split()
-    assert app["Unit"]["StartLimitIntervalSec"] == ["0"]
+    # changedetection's own password stays off: no published port, so Authentik's proxy is the only way in (no NetBird policy needed)
+    assert "PublishPort" not in app["Container"]
     # the CDP endpoint has no auth (whoever reaches it drives a browser): only changedetection reaches it, on the private network
     assert "PublishPort" not in browser["Container"]
     # headful sockpuppetbrowser drops this flag itself, leaving navigator.webdriver=true; the query string puts it back
@@ -1120,17 +1119,13 @@ def test_changedetection_units():
 
 
 def test_changedetection_routes():
-    ip, host_port, _ = containers("changedetection")["changedetection"]["Container"]["PublishPort"][0].split(":")
     http = load_routes(APPS / "changedetection" / "routes.yml")["http"]
-    assert http["services"] == {"changedetection": {"loadBalancer": {"servers": [{"url": f"http://{ip}:{host_port}"}]}}}
+    assert "services" not in http and "middlewares" not in http
     rt = http["routers"]
-    assert set(rt) == {"changedetection", "changedetection-outpost"}
-    # changedetection's own password stays off: the forward-auth middleware is the only login, nothing may skip it
+    # the whole host goes to authentik-server, whose embedded outpost (proxy mode) logs in and proxies to changedetection
+    assert set(rt) == {"changedetection"}
     assert rt["changedetection"]["rule"] == f"Host(`{CD_HOST}`)" and rt["changedetection"]["entryPoints"] == ["mesh"]
-    assert rt["changedetection"]["middlewares"] == ["authentik-forward-auth"] and rt["changedetection"]["service"] == "changedetection"
-    assert rt["changedetection-outpost"]["rule"] == f"Host(`{CD_HOST}`) && PathPrefix(`/outpost.goauthentik.io/`)"
-    assert rt["changedetection-outpost"]["entryPoints"] == ["mesh"] and rt["changedetection-outpost"]["service"] == "authentik"
-    assert "middlewares" not in rt["changedetection-outpost"]
+    assert rt["changedetection"]["service"] == "authentik" and "middlewares" not in rt["changedetection"]
     for n, r in rt.items():
         check_router(n, r)
     check_mesh_coverage(rt)

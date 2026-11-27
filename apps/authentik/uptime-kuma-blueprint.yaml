@@ -2,7 +2,7 @@
 # OIDC, so Authentik's embedded outpost (inside authentik-server) authenticates the admin UI through Traefik's forwardAuth
 # middleware `authentik-forward-auth` (apps/authentik/routes.yml); the routes are in apps/uptime-kuma/routes.yml.
 # Mounted into the worker as /blueprints/custom/uptime-kuma.yaml; nothing secret.
-# This file owns the embedded outpost for EVERY forward-auth app: its `providers` list and `config` are REPLACED on every
+# This file owns the embedded outpost for EVERY app behind it: its `providers` list and `config` are REPLACED on every
 # apply, so add any future proxy provider or outpost setting here, not in the UI. Other apps' proxy providers live in their
 # own blueprint, applied first through an authentik_blueprints.metaapplyblueprint entry and listed by name with !Find
 # (changedetection.io: changedetection-blueprint.yaml). `config` is the outpost's full stored config (authentik 2026.8.5) with
