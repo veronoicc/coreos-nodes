@@ -1113,6 +1113,9 @@ def test_changedetection_units():
     assert "PublishPort" not in browser["Container"]
     # headful sockpuppetbrowser drops this flag itself, leaving navigator.webdriver=true; the query string puts it back
     assert "PLAYWRIGHT_DRIVER_URL=ws://changedetection-browser:3000?--disable-blink-features=AutomationControlled" in app["Container"]["Environment"]
+    # Traefik sends X-Forwarded-Proto: wss on WebSocket upgrades and the outpost passes it on, so engineio's derived same-origin
+    # check expects wss://<host> and rejects every handshake (400 "Not an accepted origin"): the one real origin must be explicit
+    assert f"SOCKETIO_CORS_ORIGINS=https://{CD_HOST}" in app["Container"]["Environment"]
     assert "CHROME_HEADFUL=true" in browser["Container"]["Environment"]
     # otherwise a watched page's script could read and drive the password-less changedetection from inside the network
     assert "CHROME_DISABLE_WEB_SECURITY=false" in browser["Container"]["Environment"]

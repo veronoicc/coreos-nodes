@@ -17,6 +17,10 @@ Network=authentik.network
 # drops --disable-blink-features=AutomationControlled in headful mode (chrome.py), leaving navigator.webdriver=true; query-string
 # flags are appended after that, so this puts it back.
 Environment=PLAYWRIGHT_DRIVER_URL=ws://changedetection-browser:3000?--disable-blink-features=AutomationControlled
+# Live updates (Socket.IO): python-engineio derives the allowed origin from X-Forwarded-Proto, and on WebSocket upgrades Traefik
+# sends `wss` (the outpost passes it on), so the derived wss://<host> never matches the browser's Origin and every handshake gets
+# 400 "Not an accepted origin". Name the one real origin instead (changedetectionio/realtime/socket_server.py reads this).
+Environment=SOCKETIO_CORS_ORIGINS=https://changedetection.sapphic.world
 # No call-home version check (changedetectionio/flask_app.py).
 Environment=DISABLE_VERSION_CHECK=true
 Volume=changedetection-data.volume:/datastore

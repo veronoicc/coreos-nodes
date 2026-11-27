@@ -27,12 +27,13 @@ coke: authentik-server --http://changedetection:5000 (authentik.network)--> chan
   the network's gateway as a proxy (`apps/authentik/settings.env`), so changedetection cannot forge `X-Forwarded-*` towards it.
 - The service `authentik` lives in [`apps/authentik/routes.yml`](../authentik/routes.yml); Traefik's file provider merges all route files.
 - authentik 2026.8.5 serves port 9000 with its Rust server: the outpost keeps `Host`, sets `X-Forwarded-Host` and passes Traefik's `X-Forwarded-Proto: https`
-  through (`src/outpost/proxy/application/handlers/proxy.rs`, `src/outpost/proxy/reverse_proxy.rs`), so changedetection's same-origin check for its
-  Socket.IO live updates passes, and the reverse proxy carries the WebSocket upgrade.
+  through (`src/outpost/proxy/application/handlers/proxy.rs`, `src/outpost/proxy/reverse_proxy.rs`), and the reverse proxy carries the WebSocket upgrade.
+  On upgrades Traefik sends `X-Forwarded-Proto: wss`, which breaks python-engineio's derived same-origin check (every handshake `400 "Not an accepted
+  origin"`), so `SOCKETIO_CORS_ORIGINS=https://changedetection.sapphic.world` names the allowed origin explicitly.
 
 | File | Content |
 |---|---|
-| `changedetection.container` | `docker.io/dgtlmoon/changedetection.io:0.70.4`, networks `changedetection.network` + `authentik.network`, no published port, `PLAYWRIGHT_DRIVER_URL=ws://changedetection-browser:3000?--disable-blink-features=AutomationControlled`, `DISABLE_VERSION_CHECK=true`, data volume. |
+| `changedetection.container` | `docker.io/dgtlmoon/changedetection.io:0.70.4`, networks `changedetection.network` + `authentik.network`, no published port, `PLAYWRIGHT_DRIVER_URL=ws://changedetection-browser:3000?--disable-blink-features=AutomationControlled`, `SOCKETIO_CORS_ORIGINS=https://changedetection.sapphic.world`, `DISABLE_VERSION_CHECK=true`, data volume. |
 | `changedetection-browser.container` | `docker.io/dgtlmoon/sockpuppetbrowser:0.0.5`, `CHROME_HEADFUL=true`, 1920x1080, `LOG_LEVEL=INFO`, no published port. |
 | `changedetection.network` | Private network of the app's containers. |
 | `changedetection-exporter.container` | `git.sapphic.world/veronoicc/changedetection.io-exporter:0.2.0` (the repo's Forgejo registry), `CDIO_API_BASE_URL=http://changedetection:5000`, `CDIO_API_KEY` from the secret, `/metrics` on 9123, no published port, gated on the secret. |
@@ -107,9 +108,8 @@ State: `changedetection-data`. Stop `changedetection`, `sudo podman volume expor
 - Authentik down (or the `authentik` app removed from coke): the UI is unreachable; checks keep running. changedetection needs `authentik.network`, so
   with the Authentik app removed it does not start at all.
 - `502` from the outpost after logging in: changedetection is not running, or not on `authentik.network` (`sudo podman inspect changedetection --format '{{json .NetworkSettings.Networks}}'`).
-- Socket.IO live updates fail (UI does not refresh, browser console shows a 400 on `/socket.io/`): python-engineio's same-origin check compares the `Origin`
-  with `X-Forwarded-Proto`/`X-Forwarded-Host`, so one of them no longer reaches changedetection as `https`/`changedetection.sapphic.world` (e.g. after an
-  Authentik upgrade changed `src/outpost/proxy/`). Workaround: `Environment=SOCKETIO_CORS_ORIGINS=https://changedetection.sapphic.world` in `changedetection.container`.
+- Socket.IO live updates fail (UI does not refresh, `journalctl -u changedetection` shows `GET /socket.io/?EIO=4&transport=websocket ... 400`): the browser's
+  `Origin` is not `SOCKETIO_CORS_ORIGINS` (`https://changedetection.sapphic.world`). If the hostname changes, change it there too.
 - Restoring a backup ZIP over 32 MiB in the UI fails with `413`: authentik-server limits every request body to 32 MiB. Restore the volume instead
   (`sudo podman volume import changedetection-data changedetection-data.tar` with `changedetection` stopped).
 - `changedetection-exporter` fails with a pull error: its image comes from Forgejo on coke itself (`git.sapphic.world` via ecstasy's Traefik). Normal
