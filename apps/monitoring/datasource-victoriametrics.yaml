@@ -1,0 +1,16 @@
+# Grafana datasource provisioning (mounted read-only as /etc/grafana/provisioning/datasources/victoriametrics.yaml).
+# VictoriaMetrics speaks the Prometheus query API, so the built-in `prometheus` type is enough. Its basic-auth password reaches
+# Grafana's environment from /var/data/secrets/monitoring.env (VM_PASSWORD). Not the default: TimescaleDB stays the one default.
+apiVersion: 1
+datasources:
+  - name: VictoriaMetrics
+    uid: victoriametrics
+    type: prometheus
+    access: proxy
+    url: http://victoriametrics:8428
+    basicAuth: true
+    basicAuthUser: monitoring
+    isDefault: false
+    editable: false
+    secureJsonData:
+      basicAuthPassword: $__env{VM_PASSWORD}

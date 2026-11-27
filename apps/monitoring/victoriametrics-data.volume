@@ -1,0 +1,5 @@
+# apps-sync: keep
+# VictoriaMetrics /storage: all metric samples (1 year retention, see victoriametrics.container).
+# Persistent: `apps-sync reset monitoring` keeps it, only `apps-sync reset --include-persistent monitoring` removes it.
+[Volume]
+VolumeName=victoriametrics-data

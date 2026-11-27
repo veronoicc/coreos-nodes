@@ -175,6 +175,7 @@ def test_images_pinned():
     assert re.fullmatch(r"docker\.io/grafana/grafana:\d+\.\d+\.\d+", img["grafana"])
     assert re.fullmatch(r"docker\.io/sbs20/scanservjs:\d+\.\d+\.\d+", img["scanservjs"])
     assert re.fullmatch(r"codeberg\.org/forgejo/forgejo:\d+\.\d+\.\d+-rootless", img["forgejo"])
+    assert re.fullmatch(r"docker\.io/victoriametrics/victoria-metrics:v\d+\.\d+\.\d+", img["victoriametrics"])
 
 
 @pytest.mark.parametrize("vol", sorted(p for a in NODES_ALL for p in (APPS / a).glob("*.volume")), ids=lambda p: p.name)
@@ -758,8 +759,8 @@ GRAFANA_PUBLIC_PREFIXES = ["/public-dashboards/", "/api/public/dashboards/", "/p
 
 def test_monitoring_is_published_on_the_mesh_address_only():
     cs = containers("monitoring")
-    assert set(cs) == {"timescaledb", "grafana"}
-    for name, port in (("timescaledb", "5432"), ("grafana", "3000")):
+    assert set(cs) == {"timescaledb", "grafana", "victoriametrics"}
+    for name, port in (("timescaledb", "5432"), ("grafana", "3000"), ("victoriametrics", "8428")):
         u = cs[name]
         publish = u["Container"]["PublishPort"]
         assert len(publish) == 1, publish
@@ -775,7 +776,7 @@ def test_monitoring_units_gated_on_the_rendered_secrets():
     dest = "/var/data/secrets/monitoring.env"
     file, d, mode, owner, restart = next(l for l in targets("coke") if l[0] == "monitoring.env.sops")
     assert (d, mode, owner) == (dest, "0600", "root:root")
-    assert set(restart.split(",")) == {"timescaledb.service", "grafana.service"}
+    assert set(restart.split(",")) == {"timescaledb.service", "grafana.service", "victoriametrics.service"}
     for name, q in containers("monitoring").items():
         assert q["Unit"]["ConditionPathExists"] == [dest], name
         assert dest in q["Container"]["EnvironmentFile"], name
@@ -803,6 +804,7 @@ def test_monitoring_grafana_unit_and_datasource():
     assert c["EnvironmentFile"] == ["/etc/containers/systemd/apps/monitoring/settings.env", "/var/data/secrets/monitoring.env"]
     assert sorted(c["Volume"]) == [
         "/etc/containers/systemd/apps/monitoring/datasource-timescaledb.yaml:/etc/grafana/provisioning/datasources/timescaledb.yaml:ro,z",
+        "/etc/containers/systemd/apps/monitoring/datasource-victoriametrics.yaml:/etc/grafana/provisioning/datasources/victoriametrics.yaml:ro,z",
         "grafana-data.volume:/var/lib/grafana"]
     ds = yaml.safe_load((APPS / "monitoring" / "datasource-timescaledb.yaml").read_text())
     assert ds["apiVersion"] == 1 and len(ds["datasources"]) == 1
@@ -813,6 +815,24 @@ def test_monitoring_grafana_unit_and_datasource():
     assert d["jsonData"]["timescaledb"] is True and d["jsonData"]["database"] == "monitoring"
     assert d["jsonData"]["sslmode"] == "disable"  # private container network
     assert d["editable"] is False
+
+
+def test_monitoring_victoriametrics_unit_and_datasource():
+    c = containers("monitoring")["victoriametrics"]["Container"]
+    flags = dict((f[1:].split("=", 1) + ["true"])[:2] for f in c["Exec"][0].split())
+    assert c["Volume"] == ["victoriametrics-data.volume:/storage"] and flags["storageDataPath"] == "/storage"
+    assert c["EnvironmentFile"] == ["/var/data/secrets/monitoring.env"]
+    # systemd turns %% into %; VictoriaMetrics expands %{VM_PASSWORD} itself (lib/envflag), so the secret never is in the unit
+    assert flags["httpAuth.password"] == "%%{VM_PASSWORD}"
+    assert flags["usePromCompatibleNaming"] == "true" and flags["opentelemetry.promoteScopeMetadata"] == "false"
+    ds = yaml.safe_load((APPS / "monitoring" / "datasource-victoriametrics.yaml").read_text())
+    assert ds["apiVersion"] == 1 and len(ds["datasources"]) == 1
+    d = ds["datasources"][0]
+    assert d["type"] == "prometheus" and d["access"] == "proxy" and d["url"] == "http://victoriametrics:8428"
+    assert d["basicAuth"] is True and d["basicAuthUser"] == flags["httpAuth.username"] == "monitoring"
+    assert d["secureJsonData"] == {"basicAuthPassword": "$__env{VM_PASSWORD}"}
+    assert d["isDefault"] is False and d["editable"] is False  # TimescaleDB stays the one default datasource
+    assert parse_quadlet(APPS / "monitoring" / "victoriametrics-data.volume")["Volume"]["VolumeName"] == ["victoriametrics-data"]
 
 
 def test_monitoring_settings():
@@ -877,7 +897,7 @@ def test_scanservjs_is_published_on_the_mesh_address_only():
     assert len(publish) == 1, publish
     ip, host_port, container_port = publish[0].split(":")
     assert ipaddress.ip_address(ip) in MESH and ip == "100.127.197.215", f"{ip} must be coke's mesh address, never 0.0.0.0"
-    assert container_port == "8080" and host_port not in {"8000", "9000", "3000", "5432"}  # the other apps on coke
+    assert container_port == "8080" and host_port not in {"8000", "9000", "3000", "5432", "8428"}  # the other apps on coke
     assert "netbird.service" in u["Unit"]["After"][0].split() and "netbird.service" in u["Unit"]["Wants"][0].split()
     assert u["Unit"]["StartLimitIntervalSec"] == ["0"] and u["Service"]["Restart"] == ["on-failure"]
 
@@ -1063,8 +1083,8 @@ def test_no_private_keys_or_plaintext_config_in_the_repo():
         if rel.parts[0] not in ("tests",) and p.name != "README.md":
             # plaintext NetBird config / Authentik env would carry these keys with a literal value
             assert not re.search(rb"(?m)^\s*(encryptionKey|authSecret|sessionCookieEncryptionKey):\s*[\"']?[A-Za-z0-9+/=]{16,}", data), rel
-            assert not re.search(rb"(?m)^(AUTHENTIK_SECRET_KEY|POSTGRES_PASSWORD|AUTHENTIK_POSTGRESQL__PASSWORD|AUTHENTIK_NETBIRD_CLIENT_SECRET|AUTHENTIK_PAPERLESS_CLIENT_SECRET|AUTHENTIK_GRAFANA_CLIENT_SECRET|AUTHENTIK_FORGEJO_CLIENT_SECRET|FORGEJO__security__SECRET_KEY|FORGEJO_RUNNER_\d_SECRET|PAPERLESS_SECRET_KEY|PAPERLESS_SOCIALACCOUNT_PROVIDERS|GRAFANA_DB_PASSWORD|GF_SECURITY_ADMIN_PASSWORD|GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET)=[^E\s]", data), rel
-    for forbidden in (ROOT / "secrets" / "ecstasy" / "config.yaml", ROOT / "secrets" / "coke" / "authentik.env", ROOT / "secrets" / "coke" / "paperless.env", ROOT / "secrets" / "coke" / "authentik-paperless.env", ROOT / "secrets" / "coke" / "monitoring.env", ROOT / "secrets" / "coke" / "authentik-grafana.env", ROOT / "secrets" / "coke" / "forgejo.env", ROOT / "secrets" / "coke" / "authentik-forgejo.env", ROOT / "secrets" / "coke" / "forgejo-runners.env", APPS / "netbird" / "config.yaml"):
+            assert not re.search(rb"(?m)^(AUTHENTIK_SECRET_KEY|POSTGRES_PASSWORD|AUTHENTIK_POSTGRESQL__PASSWORD|AUTHENTIK_NETBIRD_CLIENT_SECRET|AUTHENTIK_PAPERLESS_CLIENT_SECRET|AUTHENTIK_GRAFANA_CLIENT_SECRET|AUTHENTIK_FORGEJO_CLIENT_SECRET|FORGEJO__security__SECRET_KEY|FORGEJO_RUNNER_\d_SECRET|PAPERLESS_SECRET_KEY|PAPERLESS_SOCIALACCOUNT_PROVIDERS|GRAFANA_DB_PASSWORD|GF_SECURITY_ADMIN_PASSWORD|GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET|VM_PASSWORD|VM_BASIC_AUTH)=[^E\s]", data), rel
+    for forbidden in (ROOT / "secrets" / "ecstasy" / "config.yaml", ROOT / "secrets" / "coke" / "authentik.env", ROOT / "secrets" / "coke" / "paperless.env", ROOT / "secrets" / "coke" / "authentik-paperless.env", ROOT / "secrets" / "coke" / "monitoring.env", ROOT / "secrets" / "coke" / "authentik-grafana.env", ROOT / "secrets" / "coke" / "forgejo.env", ROOT / "secrets" / "coke" / "authentik-forgejo.env", ROOT / "secrets" / "coke" / "forgejo-runners.env", ROOT / "secrets" / "ecstasy" / "uptime-kuma.env", APPS / "netbird" / "config.yaml"):
         assert not forbidden.exists()
 
 

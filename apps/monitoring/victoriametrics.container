@@ -1,0 +1,37 @@
+[Unit]
+Description=VictoriaMetrics (metrics store: OTLP ingest from Uptime Kuma's collector, Prometheus API for Grafana)
+Wants=network-online.target netbird.service
+# netbird.service is the baked NetBird client: the mesh interface (wt0) has to exist before the port can be bound to the
+# mesh address. It is only ordered, not required; if the bind still fails the unit is retried (below).
+After=network-online.target netbird.service
+RequiresMountsFor=/var/data
+# /var/data/secrets/monitoring.env is rendered by secrets-sync (secrets/coke/monitoring.env.sops); until then the unit is skipped
+# instead of crash-looping, and secrets-sync restarts the monitoring units when it appears or changes.
+ConditionPathExists=/var/data/secrets/monitoring.env
+# Retry forever: after a reboot the mesh address appears some seconds after the client started.
+StartLimitIntervalSec=0
+
+[Container]
+Image=docker.io/victoriametrics/victoria-metrics:v1.157.0
+ContainerName=victoriametrics
+Network=monitoring.network
+# Only on coke's mesh address: the OTel Collector on ecstasy pushes OTLP here (apps/uptime-kuma/otelcol.conf; a test checks they match).
+PublishPort=100.127.197.215:8428:8428
+# VM_PASSWORD (basic auth for every endpoint except /health, /ping, /-/healthy, /-/ready, /robots.txt). Read by podman, not systemd.
+EnvironmentFile=/var/data/secrets/monitoring.env
+Volume=victoriametrics-data.volume:/storage
+# %% is a literal % for systemd; VictoriaMetrics expands %{VM_PASSWORD} from its environment. Dots in OTel names/labels become
+# underscores (service.name -> service_name); scope labels are dropped so a collector upgrade does not fork every series.
+Exec=-storageDataPath=/storage \
+  -retentionPeriod=1y \
+  -httpAuth.username=monitoring \
+  -httpAuth.password=%%{VM_PASSWORD} \
+  -usePromCompatibleNaming \
+  -opentelemetry.promoteScopeMetadata=false
+
+[Service]
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
