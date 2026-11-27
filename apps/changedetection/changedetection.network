@@ -1,0 +1,3 @@
+[Network]
+# Private network of changedetection and its browser: the browser's CDP port is only reachable from here; only changedetection's
+# HTTP port is published, on the mesh address (changedetection.container).

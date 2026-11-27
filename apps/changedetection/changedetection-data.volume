@@ -1,0 +1,5 @@
+# apps-sync: keep
+# changedetection.io /datastore: watches, history snapshots, screenshots, settings.
+# Persistent: `apps-sync reset changedetection` keeps it, only `apps-sync reset --include-persistent changedetection` removes it.
+[Volume]
+VolumeName=changedetection-data

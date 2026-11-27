@@ -1,0 +1,25 @@
+[Unit]
+Description=sockpuppetbrowser (headful Google Chrome over CDP for changedetection.io)
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/var/data
+
+[Container]
+Image=docker.io/dgtlmoon/sockpuppetbrowser:0.0.5
+ContainerName=changedetection-browser
+# Private network only, no PublishPort: the CDP endpoint (3000) and /stats (8080) have no auth.
+Network=changedetection.network
+# One fresh Chrome per CDP connection, so nothing runs while idle; at most MAX_CONCURRENT_CHROME_PROCESSES (default 10) at
+# once, the rest queue (CONNECTION_QUEUE_TIMEOUT 120 s). Headful under a per-browser Xvfb (1920x1080): no headless tells.
+Environment=CHROME_HEADFUL=true
+Environment=SCREEN_WIDTH=1920
+Environment=SCREEN_HEIGHT=1080
+# The image default DEBUG logs every CDP command.
+Environment=LOG_LEVEL=INFO
+
+[Service]
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

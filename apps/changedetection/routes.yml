@@ -1,0 +1,32 @@
+# Traefik routes for changedetection.sapphic.world. changedetection runs on coke, which accepts no inbound connections: Traefik
+# reaches it over the NetBird mesh at coke's mesh address. Mesh only, two routers on one host (Traefik's default priority is the
+# rule length, so the outpost rule wins over the bare Host router):
+# - changedetection: the whole app behind Authentik forward auth (middleware authentik-forward-auth, apps/authentik/routes.yml).
+#   changedetection's own password stays off, so this middleware is the only login.
+# - changedetection-outpost: the outpost's callback/sign-in paths on this host, to Authentik (service authentik).
+# MESH ADDRESS: the same address is in apps/changedetection/changedetection.container (PublishPort); a test checks they match.
+# See apps/changedetection/README.md.
+http:
+  routers:
+    changedetection:
+      rule: Host(`changedetection.sapphic.world`)
+      entryPoints: [mesh]
+      middlewares: [authentik-forward-auth]
+      tls:
+        certResolver: letsencrypt-dns
+        domains:
+          - main: "*.sapphic.world"
+      service: changedetection
+    changedetection-outpost:
+      rule: Host(`changedetection.sapphic.world`) && PathPrefix(`/outpost.goauthentik.io/`)
+      entryPoints: [mesh]
+      tls:
+        certResolver: letsencrypt-dns
+        domains:
+          - main: "*.sapphic.world"
+      service: authentik
+  services:
+    changedetection:
+      loadBalancer:
+        servers:
+          - url: http://100.127.197.215:5000

@@ -70,8 +70,8 @@ def targets(node):
 
 
 def test_apps_and_node_lists():
-    assert {p.name for p in APPS.iterdir()} == {"traefik", "netbird", "authentik", "paperless", "monitoring", "scanservjs", "forgejo", "uptime-kuma"}
-    assert NODES == {"ecstasy": ["traefik", "netbird", "uptime-kuma"], "coke": ["authentik", "paperless", "monitoring", "scanservjs", "forgejo"]}
+    assert {p.name for p in APPS.iterdir()} == {"traefik", "netbird", "authentik", "paperless", "monitoring", "scanservjs", "forgejo", "uptime-kuma", "changedetection"}
+    assert NODES == {"ecstasy": ["traefik", "netbird", "uptime-kuma"], "coke": ["authentik", "paperless", "monitoring", "scanservjs", "forgejo", "changedetection"]}
     assert not (ROOT / "tests" / "test_netbird_backend.py").exists()
 
 
@@ -178,6 +178,8 @@ def test_images_pinned():
     assert re.fullmatch(r"docker\.io/victoriametrics/victoria-metrics:v\d+\.\d+\.\d+", img["victoriametrics"])
     assert re.fullmatch(r"docker\.io/louislam/uptime-kuma:\d+\.\d+\.\d+-slim", img["uptime-kuma"])
     assert re.fullmatch(r"docker\.io/otel/opentelemetry-collector:\d+\.\d+\.\d+", img["uptime-kuma-otelcol"])
+    assert re.fullmatch(r"docker\.io/dgtlmoon/changedetection\.io:\d+\.\d+\.\d+", img["changedetection"])
+    assert re.fullmatch(r"docker\.io/dgtlmoon/sockpuppetbrowser:\d+\.\d+\.\d+", img["changedetection-browser"])
 
 
 @pytest.mark.parametrize("vol", sorted(p for a in NODES_ALL for p in (APPS / a).glob("*.volume")), ids=lambda p: p.name)
@@ -1084,6 +1086,49 @@ def test_uptime_kuma_routes():
     assert rt["uptime-kuma-outpost"]["rule"] == f"Host(`{STATUS_HOST}`) && PathPrefix(`/outpost.goauthentik.io/`)"
     assert rt["uptime-kuma-outpost"]["entryPoints"] == ["mesh"] and rt["uptime-kuma-outpost"]["service"] == "authentik"
     assert "middlewares" not in rt["uptime-kuma-public"] and "middlewares" not in rt["uptime-kuma-outpost"]
+    for n, r in rt.items():
+        check_router(n, r)
+    check_mesh_coverage(rt)
+
+
+# -------------------------------------------------------------- changedetection
+
+
+def test_changedetection_units():
+    cs = containers("changedetection")
+    assert set(cs) == {"changedetection", "changedetection-browser"}
+    for q in cs.values():
+        assert q["Container"]["Network"] == ["changedetection.network"]
+    app, browser = cs["changedetection"], cs["changedetection-browser"]
+    publish = app["Container"]["PublishPort"]
+    assert len(publish) == 1, publish
+    ip, host_port, container_port = publish[0].split(":")
+    authentik_ip = containers("authentik")["authentik-server"]["Container"]["PublishPort"][0].split(":")[0]
+    assert ipaddress.ip_address(ip) in MESH and ip == authentik_ip, f"{ip} must be coke's mesh address, never 0.0.0.0"
+    assert container_port == "5000" and host_port not in {"9000", "3000", "3001", "2222", "5432", "8428", "8000", "8081"}
+    assert "netbird.service" in app["Unit"]["After"][0].split() and "netbird.service" in app["Unit"]["Wants"][0].split()
+    assert app["Unit"]["StartLimitIntervalSec"] == ["0"]
+    # the CDP endpoint has no auth (whoever reaches it drives a browser): only changedetection reaches it, on the private network
+    assert "PublishPort" not in browser["Container"]
+    # headful sockpuppetbrowser drops this flag itself, leaving navigator.webdriver=true; the query string puts it back
+    assert "PLAYWRIGHT_DRIVER_URL=ws://changedetection-browser:3000?--disable-blink-features=AutomationControlled" in app["Container"]["Environment"]
+    assert "CHROME_HEADFUL=true" in browser["Container"]["Environment"]
+    assert app["Container"]["Volume"] == ["changedetection-data.volume:/datastore"]
+    assert "changedetection" in NODES["coke"] and "changedetection" not in NODES["ecstasy"]
+
+
+def test_changedetection_routes():
+    ip, host_port, _ = containers("changedetection")["changedetection"]["Container"]["PublishPort"][0].split(":")
+    http = load_routes(APPS / "changedetection" / "routes.yml")["http"]
+    assert http["services"] == {"changedetection": {"loadBalancer": {"servers": [{"url": f"http://{ip}:{host_port}"}]}}}
+    rt = http["routers"]
+    assert set(rt) == {"changedetection", "changedetection-outpost"}
+    # changedetection's own password stays off: the forward-auth middleware is the only login, nothing may skip it
+    assert rt["changedetection"]["rule"] == f"Host(`{CD_HOST}`)" and rt["changedetection"]["entryPoints"] == ["mesh"]
+    assert rt["changedetection"]["middlewares"] == ["authentik-forward-auth"] and rt["changedetection"]["service"] == "changedetection"
+    assert rt["changedetection-outpost"]["rule"] == f"Host(`{CD_HOST}`) && PathPrefix(`/outpost.goauthentik.io/`)"
+    assert rt["changedetection-outpost"]["entryPoints"] == ["mesh"] and rt["changedetection-outpost"]["service"] == "authentik"
+    assert "middlewares" not in rt["changedetection-outpost"]
     for n, r in rt.items():
         check_router(n, r)
     check_mesh_coverage(rt)

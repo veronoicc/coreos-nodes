@@ -1,0 +1,33 @@
+[Unit]
+Description=changedetection.io (changedetection.sapphic.world, mesh only behind Authentik forward auth)
+Wants=network-online.target netbird.service changedetection-browser.service
+# netbird.service is the baked NetBird client: the mesh interface (wt0) has to exist before the port can be bound to the
+# mesh address. Only ordered, not required; if the bind still fails the unit is retried (below). The browser is only
+# wanted: watches on the plain HTTP fetcher keep working without it.
+After=network-online.target netbird.service changedetection-browser.service
+RequiresMountsFor=/var/data
+# Retry forever: after a reboot the mesh address appears some seconds after the client started.
+StartLimitIntervalSec=0
+
+[Container]
+Image=docker.io/dgtlmoon/changedetection.io:0.70.4
+ContainerName=changedetection
+Network=changedetection.network
+# Reachable ONLY on coke's mesh address, never on 0.0.0.0. changedetection's own password stays off (Authentik forward auth in
+# routes.yml is the only login), so a NetBird policy must allow this port only from ecstasy (README.md). The same address is in
+# apps/changedetection/routes.yml; edit both if the peer is re-registered.
+PublishPort=100.127.197.215:5000:5000
+# Playwright fetcher -> sockpuppetbrowser (changedetection-browser.container) over CDP on the private network. sockpuppetbrowser
+# drops --disable-blink-features=AutomationControlled in headful mode (chrome.py), leaving navigator.webdriver=true; query-string
+# flags are appended after that, so this puts it back.
+Environment=PLAYWRIGHT_DRIVER_URL=ws://changedetection-browser:3000?--disable-blink-features=AutomationControlled
+# No call-home version check (changedetectionio/flask_app.py).
+Environment=DISABLE_VERSION_CHECK=true
+Volume=changedetection-data.volume:/datastore
+
+[Service]
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
