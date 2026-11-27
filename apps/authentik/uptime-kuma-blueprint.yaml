@@ -1,0 +1,37 @@
+# Authentik blueprint: forward-auth proxy provider + application for Uptime Kuma (status.sapphic.world). Uptime Kuma has no
+# OIDC, so Authentik's embedded outpost (inside authentik-server) authenticates the admin UI through Traefik's forwardAuth
+# middleware `authentik-forward-auth` (apps/authentik/routes.yml); the routes are in apps/uptime-kuma/routes.yml.
+# Mounted into the worker as /blueprints/custom/uptime-kuma.yaml; nothing secret.
+# The `providers` list of the embedded outpost is REPLACED on every apply: add any future proxy provider here, not in the UI.
+version: 1
+metadata:
+  name: Uptime Kuma
+entries:
+  - model: authentik_providers_proxy.proxyprovider
+    id: uptime-kuma-provider
+    identifiers:
+      name: Uptime Kuma
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      mode: forward_single
+      external_host: https://status.sapphic.world
+  - model: authentik_core.application
+    identifiers:
+      slug: uptime-kuma
+    attrs:
+      name: Uptime Kuma
+      provider: !KeyOf uptime-kuma-provider
+      meta_launch_url: https://status.sapphic.world/dashboard
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !Find [authentik_core.application, [slug, uptime-kuma]]
+      order: 0
+    attrs:
+      group: !Find [authentik_core.group, [name, authentik Admins]]
+  - model: authentik_outposts.outpost
+    identifiers:
+      managed: goauthentik.io/outposts/embedded
+    attrs:
+      providers:
+        - !KeyOf uptime-kuma-provider

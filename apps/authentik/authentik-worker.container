@@ -37,6 +37,8 @@ Volume=/etc/containers/systemd/apps/authentik/paperless-blueprint.yaml:/blueprin
 Volume=/etc/containers/systemd/apps/authentik/grafana-blueprint.yaml:/blueprints/custom/grafana.yaml:ro,z
 # Blueprint: declares the Forgejo OIDC provider, application and its group binding; client secret via !Env (above).
 Volume=/etc/containers/systemd/apps/authentik/forgejo-blueprint.yaml:/blueprints/custom/forgejo.yaml:ro,z
+# Blueprint: Uptime Kuma forward-auth proxy provider, application, group binding, embedded outpost assignment (no secret).
+Volume=/etc/containers/systemd/apps/authentik/uptime-kuma-blueprint.yaml:/blueprints/custom/uptime-kuma.yaml:ro,z
 
 [Service]
 Restart=on-failure

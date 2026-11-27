@@ -195,6 +195,7 @@ def traefik_flags():
 PUBLIC_IP, MESH_IP = "176.65.149.212", "100.127.17.6"  # ecstasy: ens18 and wt0 (the NetBird mesh address of the peer)
 ZONES = ("service.veronoi.cc", "sapphic.world")  # each: Cloudflare wildcard -> PUBLIC_IP; NetBird custom zone `A *` -> MESH_IP
 AUTH_HOST, NB_HOST = "auth.sapphic.world", "mesh.sapphic.world"
+STATUS_HOST = "status.sapphic.world"
 
 
 def test_traefik_static_config():
@@ -396,7 +397,7 @@ def test_everything_traefik_reads_on_a_node_is_a_valid_route_file(node):
     foreign YAML (Authentik blueprint, static config) would break all routing, so it must be on another node."""
     files = route_files(node)
     assert files, node
-    routers, services, tcp_routers, tcp_services = {}, {}, {}, {}
+    routers, services, middlewares, tcp_routers, tcp_services = {}, {}, {}, {}, {}
     for p in files:
         cfg = load_routes(p)
         http = cfg.get("http", {})
@@ -407,6 +408,9 @@ def test_everything_traefik_reads_on_a_node_is_a_valid_route_file(node):
         for n, s in http.get("services", {}).items():
             assert n not in services, f"service {n} defined twice"
             services[n] = s
+        for n, m in http.get("middlewares", {}).items():
+            assert n not in middlewares, f"middleware {n} defined twice"
+            middlewares[n] = m
         tcp = cfg.get("tcp", {})
         for n, r in tcp.get("routers", {}).items():
             assert n not in tcp_routers, f"tcp router {n} defined twice"
@@ -417,6 +421,8 @@ def test_everything_traefik_reads_on_a_node_is_a_valid_route_file(node):
             tcp_services[n] = s
     for n, r in routers.items():
         assert r["service"] in services, f"router {n}: unknown service {r['service']}"
+        for m in r.get("middlewares", []):
+            assert m in middlewares, f"router {n}: unknown middleware {m}"
     for n, r in tcp_routers.items():
         assert r["service"] in tcp_services, f"tcp router {n}: unknown service {r['service']}"
     eps = [ep for r in tcp_routers.values() for ep in r["entryPoints"]]
@@ -538,6 +544,8 @@ def test_authentik_is_published_on_the_mesh_address_only():
     # the route on the node that owns the public IP points at the same address
     route = load_routes(APPS / "authentik" / "routes.yml")["http"]
     assert route["services"]["authentik"]["loadBalancer"]["servers"] == [{"url": f"http://{ip}:9000"}]
+    fa = route["middlewares"]["authentik-forward-auth"]["forwardAuth"]
+    assert fa == {"address": f"http://{ip}:9000/outpost.goauthentik.io/auth/traefik", "trustForwardHeader": True}
     assert set(route["routers"]) == {"authentik"}
     assert route["routers"]["authentik"]["rule"] == f"Host(`{AUTH_HOST}`)"
     for n, r in route["routers"].items():
@@ -668,6 +676,28 @@ def test_grafana_blueprint():
     assert "AUTHENTIK_GRAFANA" not in (APPS / "authentik" / "authentik-server.container").read_text()
     file, dest, mode, owner, restart = next(l for l in targets("coke") if l[0] == "authentik-grafana.env.sops")
     assert (dest, mode, owner, restart) == ("/var/data/secrets/authentik-grafana.env", "0600", "root:root", "authentik-worker.service")
+
+
+def test_uptime_kuma_blueprint():
+    doc = load_blueprint(APPS / "authentik" / "uptime-kuma-blueprint.yaml")
+    assert doc["version"] == 1
+    entry = lambda m: next(e for e in doc["entries"] if e["model"] == m)  # noqa: E731
+    provider = entry("authentik_providers_proxy.proxyprovider")
+    assert provider["id"] == "uptime-kuma-provider"
+    assert provider["attrs"]["mode"] == "forward_single" and provider["attrs"]["external_host"] == f"https://{STATUS_HOST}"
+    assert provider["attrs"]["authorization_flow"].value == ["authentik_flows.flow", ["slug", "default-provider-authorization-implicit-consent"]]
+    app = entry("authentik_core.application")
+    assert app["identifiers"] == {"slug": "uptime-kuma"} and app["attrs"]["provider"].tag == "KeyOf"
+    assert app["attrs"]["meta_launch_url"] == f"https://{STATUS_HOST}/dashboard"
+    binding = entry("authentik_policies.policybinding")
+    assert binding["identifiers"]["target"].value == ["authentik_core.application", ["slug", "uptime-kuma"]]
+    assert binding["attrs"]["group"].value == ["authentik_core.group", ["name", "authentik Admins"]]
+    outpost = entry("authentik_outposts.outpost")  # the embedded outpost (inside authentik-server) serves the forward auth
+    assert outpost["identifiers"] == {"managed": "goauthentik.io/outposts/embedded"}
+    assert [(p.tag, p.value) for p in outpost["attrs"]["providers"]] == [("KeyOf", "uptime-kuma-provider")]
+    assert not [n for n in walk(doc) if isinstance(n, _Tag) and n.tag == "Env"]  # no secret: nothing to render
+    worker = parse_quadlet(APPS / "authentik" / "authentik-worker.container")
+    assert "uptime-kuma-blueprint.yaml:/blueprints/custom/uptime-kuma.yaml:ro,z" in "".join(worker["Container"]["Volume"])
 
 
 def walk(node):
