@@ -29,7 +29,8 @@ browser --443--> ecstasy (176.65.149.212): Traefik, TLS for auth.sapphic.world (
   honour the `X-Forwarded-Proto/Host` from Traefik and build `https://auth.sapphic.world/...` URLs. The `authentik.network` gateway
   (`10.89.10.1`) is deliberately not trusted: changedetection's hairpin connections to the published port would arrive as the gateway
   and could forge `X-Forwarded-*`. If a client update ever restores the old marks, Authentik serves `http://` URLs: fix the marks, do
-  not re-add the gateway.
+  not re-add the gateway. Check on coke (prints `NB_FWMARK_BASE=0x1000000`; nodes installed before the fix get it only from the hand-made
+  drop-in in the root README): `sudo podman inspect netbird --format '{{range .Config.Env}}{{println .}}{{end}}' | grep NB_FWMARK_BASE`.
 - No SMTP (no recovery mails). Error reporting off (`AUTHENTIK_ERROR_REPORTING__ENABLED=false`) and update check off
   (`AUTHENTIK_DISABLE_UPDATE_CHECK=true`): no telemetry call-home that upstream allows to disable.
 

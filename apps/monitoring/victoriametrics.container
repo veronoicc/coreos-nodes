@@ -1,5 +1,5 @@
 [Unit]
-Description=VictoriaMetrics (metrics store: OTLP ingest from Uptime Kuma's collector, Prometheus API for Grafana)
+Description=VictoriaMetrics (metrics store: OTLP ingest from the Uptime Kuma and changedetection collectors, Prometheus API for Grafana)
 Wants=network-online.target netbird.service
 # netbird.service is the baked NetBird client: the mesh interface (wt0) has to exist before the port can be bound to the
 # mesh address. It is only ordered, not required; if the bind still fails the unit is retried (below).

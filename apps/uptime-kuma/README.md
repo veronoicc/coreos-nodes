@@ -74,18 +74,21 @@ p=$(openssl rand -hex 24)
 printf 'VM_BASIC_AUTH=%s\n' "$(printf 'monitoring:%s' "$p" | base64 -w0)" |
   sops --encrypt --filename-override secrets/ecstasy/uptime-kuma.env.sops --input-type dotenv --output-type dotenv \
   --output secrets/ecstasy/uptime-kuma.env.sops /dev/stdin
-[ ! -e secrets/coke/changedetection.env.sops ] ||
+if [ -e secrets/coke/changedetection.env.sops ]; then
   { sops -d --input-type dotenv --output-type dotenv secrets/coke/changedetection.env.sops | grep -v '^VM_BASIC_AUTH='
     printf 'VM_BASIC_AUTH=%s\n' "$(printf 'monitoring:%s' "$p" | base64 -w0)"; } |
   sops --encrypt --filename-override secrets/coke/changedetection.env.sops --input-type dotenv --output-type dotenv \
   --output secrets/coke/changedetection.env.sops.new /dev/stdin && mv secrets/coke/changedetection.env.sops.new secrets/coke/changedetection.env.sops
+fi
 ```
 
-Check that both match (prints `match`, never the value):
+Check that all copies match (prints `match` once per copy, never the value):
 
 ```
-[ "$(sops -d --input-type dotenv --output-type dotenv --extract '["VM_PASSWORD"]' secrets/coke/monitoring.env.sops)" = \
-  "$(sops -d --input-type dotenv --output-type dotenv --extract '["VM_BASIC_AUTH"]' secrets/ecstasy/uptime-kuma.env.sops | base64 -d | cut -d: -f2)" ] && echo match
+vm=$(sops -d --input-type dotenv --output-type dotenv --extract '["VM_PASSWORD"]' secrets/coke/monitoring.env.sops)
+for f in secrets/ecstasy/uptime-kuma.env.sops secrets/coke/changedetection.env.sops; do
+  [ ! -e "$f" ] || { [ "$vm" = "$(sops -d --input-type dotenv --output-type dotenv --extract '["VM_BASIC_AUTH"]' "$f" | base64 -d | cut -d: -f2)" ] && echo "match $f"; }
+done
 ```
 
 Push; secrets-sync restarts `timescaledb`, `grafana`, `victoriametrics`, `changedetection-exporter`, `changedetection-otelcol` (coke) and `uptime-kuma-otelcol` (ecstasy).

@@ -20,8 +20,9 @@ coke: authentik-server --http://changedetection:5000 (authentik.network)--> chan
 
 - No container publishes a port. changedetection is on two networks: `changedetection.network` (with its browser) and `authentik.network`, where
   authentik-server reaches it by container name (`internal_host` in the blueprint; a test checks it matches `ContainerName`).
-- The browser is only on `changedetection.network`: its CDP endpoint (3000) and `/stats` (8080) have no auth, and the untrusted page script it runs must not reach Authentik.
-  The reverse direction (authentik-server joining `changedetection.network`) is deliberately not used for that reason.
+- The browser is only on `changedetection.network`: its CDP endpoint (3000) and `/stats` (8080) have no auth, and the untrusted page script it runs should not
+  share a network with Authentik, so authentik-server does not join `changedetection.network`. Podman networks are not isolated from each other on coke
+  (no `isolate` option), so the browser can still reach other containers by IP; those still require their own authentication.
 - On `authentik.network` changedetection can also open connections to `authentik-postgres`, which still requires its password. Authentik does not trust
   the network's gateway as a proxy (`apps/authentik/settings.env`), so changedetection cannot forge `X-Forwarded-*` towards it.
 - The service `authentik` lives in [`apps/authentik/routes.yml`](../authentik/routes.yml); Traefik's file provider merges all route files.
@@ -111,3 +112,9 @@ State: `changedetection-data`. Stop `changedetection`, `sudo podman volume expor
   Authentik upgrade changed `src/outpost/proxy/`). Workaround: `Environment=SOCKETIO_CORS_ORIGINS=https://changedetection.sapphic.world` in `changedetection.container`.
 - Restoring a backup ZIP over 32 MiB in the UI fails with `413`: authentik-server limits every request body to 32 MiB. Restore the volume instead
   (`sudo podman volume import changedetection-data changedetection-data.tar` with `changedetection` stopped).
+- `changedetection-exporter` fails with a pull error: its image comes from Forgejo on coke itself (`git.sapphic.world` via ecstasy's Traefik). Normal
+  restarts reuse the local image; a fresh install, a version bump or an image prune needs Forgejo and ecstasy up. It retries every 10 s until the pull
+  works; if Forgejo's data was not restored, push the image to the registry again.
+- `changedetectionio_up == 0`: the API key in `changedetection.env.sops` no longer matches Settings -> API; redo setup step 4. Collector log shows `401`:
+  `VM_BASIC_AUTH` differs from `VM_PASSWORD`; check with the recipe in `apps/uptime-kuma/README.md`.
+- The `monitoring` app removed from coke: `changedetection-otelcol` needs `monitoring.network` and does not start; the rest keeps running.
