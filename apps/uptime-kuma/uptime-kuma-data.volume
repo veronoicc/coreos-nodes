@@ -1,0 +1,5 @@
+# apps-sync: keep
+# Uptime Kuma /app/data: SQLite kuma.db (monitors, status pages, settings), uploaded status-page logos.
+# Persistent: `apps-sync reset uptime-kuma` keeps it, only `apps-sync reset --include-persistent uptime-kuma` removes it.
+[Volume]
+VolumeName=uptime-kuma-data

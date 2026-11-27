@@ -800,4 +800,5 @@ def test_repo_manifest_for_ecstasy():
         ],
         ["traefik.env.sops", "/var/data/secrets/traefik.env", "0600", "root:root", "traefik.service"],
         ["registry-auth.json.sops", "/root/.config/containers/auth.json", "0600", "root:root", "-"],
+        ["uptime-kuma.env.sops", "/var/data/secrets/uptime-kuma.env", "0600", "root:root", "uptime-kuma-otelcol.service"],
     ]

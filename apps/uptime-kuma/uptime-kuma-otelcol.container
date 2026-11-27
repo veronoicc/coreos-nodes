@@ -1,0 +1,24 @@
+[Unit]
+Description=OpenTelemetry Collector (scrapes Uptime Kuma /metrics, pushes OTLP to VictoriaMetrics on coke)
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/var/data
+# /var/data/secrets/uptime-kuma.env (VM_BASIC_AUTH) is rendered by secrets-sync (secrets/ecstasy/uptime-kuma.env.sops); until
+# then the unit is skipped, and secrets-sync restarts it when the file appears or changes.
+ConditionPathExists=/var/data/secrets/uptime-kuma.env
+
+[Container]
+Image=docker.io/otel/opentelemetry-collector:0.166.0
+ContainerName=uptime-kuma-otelcol
+# Same network as uptime-kuma (scrape target uptime-kuma:3001); egress to coke's mesh address like Traefik's.
+Network=traefik.network
+EnvironmentFile=/var/data/secrets/uptime-kuma.env
+# At the image's default --config path. Named .conf: Traefik on this node parses every .yml/.yaml/.toml in the apps dir.
+Volume=/etc/containers/systemd/apps/uptime-kuma/otelcol.conf:/etc/otelcol/config.yaml:ro,z
+
+[Service]
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

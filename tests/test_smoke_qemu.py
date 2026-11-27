@@ -384,7 +384,7 @@ def test_ecstasy_apps_are_declarative(vm, tmp_path, real_tools):
     ssh = vm["ssh"]
     sudo = lambda *a, **k: ssh("sudo", *a, **k)  # noqa: E731
     src = make_src(tmp_path, "ecstasy")
-    assert 'APPS_LIST="traefik netbird"' in sudo("cat", "/etc/apps-sync.env").stdout
+    assert 'APPS_LIST="traefik netbird uptime-kuma"' in sudo("cat", "/etc/apps-sync.env").stdout
     pub = sudo("cat", "/var/data/secrets/age.pub").stdout.strip()
 
     # 0. Traefik needs its Cloudflare token (EnvironmentFile) to start: render a dummy one first, so it starts without a retry loop

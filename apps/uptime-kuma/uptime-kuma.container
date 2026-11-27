@@ -1,0 +1,22 @@
+[Unit]
+Description=Uptime Kuma (public status page status.sapphic.world, admin mesh-only behind Authentik)
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/var/data
+
+[Container]
+Image=docker.io/louislam/uptime-kuma:2.5.12-slim
+ContainerName=uptime-kuma
+# Routed by Traefik (routes.yml) on the shared network of apps/traefik. No PublishPort: Kuma's own login is disabled
+# (Authentik forward auth replaces it, see README.md), so Traefik must be the only way in.
+Network=traefik.network
+# SQLite in /app/data; setting the type skips Kuma's database setup page (server/setup-database.js).
+Environment=UPTIME_KUMA_DB_TYPE=sqlite
+Volume=uptime-kuma-data.volume:/app/data
+
+[Service]
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

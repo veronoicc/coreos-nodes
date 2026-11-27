@@ -70,8 +70,8 @@ def targets(node):
 
 
 def test_apps_and_node_lists():
-    assert {p.name for p in APPS.iterdir()} == {"traefik", "netbird", "authentik", "paperless", "monitoring", "scanservjs", "forgejo"}
-    assert NODES == {"ecstasy": ["traefik", "netbird"], "coke": ["authentik", "paperless", "monitoring", "scanservjs", "forgejo"]}
+    assert {p.name for p in APPS.iterdir()} == {"traefik", "netbird", "authentik", "paperless", "monitoring", "scanservjs", "forgejo", "uptime-kuma"}
+    assert NODES == {"ecstasy": ["traefik", "netbird", "uptime-kuma"], "coke": ["authentik", "paperless", "monitoring", "scanservjs", "forgejo"]}
     assert not (ROOT / "tests" / "test_netbird_backend.py").exists()
 
 
@@ -176,6 +176,8 @@ def test_images_pinned():
     assert re.fullmatch(r"docker\.io/sbs20/scanservjs:\d+\.\d+\.\d+", img["scanservjs"])
     assert re.fullmatch(r"codeberg\.org/forgejo/forgejo:\d+\.\d+\.\d+-rootless", img["forgejo"])
     assert re.fullmatch(r"docker\.io/victoriametrics/victoria-metrics:v\d+\.\d+\.\d+", img["victoriametrics"])
+    assert re.fullmatch(r"docker\.io/louislam/uptime-kuma:\d+\.\d+\.\d+-slim", img["uptime-kuma"])
+    assert re.fullmatch(r"docker\.io/otel/opentelemetry-collector:\d+\.\d+\.\d+", img["uptime-kuma-otelcol"])
 
 
 @pytest.mark.parametrize("vol", sorted(p for a in NODES_ALL for p in (APPS / a).glob("*.volume")), ids=lambda p: p.name)
@@ -995,6 +997,60 @@ def test_scanservjs_config_local_js():
     for needle in ("f['--mode'].default = 'Color'", "f['--resolution'].default = 300", "f['-x'].default = 210", "f['-y'].default = 297"):
         assert needle in js, needle
 
+
+# -------------------------------------------------------------- uptime-kuma
+
+# What an anonymous viewer of a status page needs (uptime-kuma 2.5.12: server/routers/status-page-router.js, api-router.js
+# /api/entry-page /api/push /api/badge (public monitors only, isMonitorPublic), server.js /upload static, index.html icons,
+# src/main.js /serviceWorker.js; status pages use no socket.io, src/mixins/socket.js noSocketIOPages)
+UPTIME_KUMA_PUBLIC = ["Path(`/`)", "PathPrefix(`/status`)", "Path(`/api/entry-page`)", "PathPrefix(`/api/status-page/`)",
+                      "PathPrefix(`/api/push/`)", "PathPrefix(`/api/badge/`)", "PathPrefix(`/assets/`)", "PathPrefix(`/upload/`)",
+                      "Path(`/icon.svg`)", "Path(`/favicon.ico`)", "Path(`/apple-touch-icon.png`)", "Path(`/serviceWorker.js`)"]
+
+
+def test_uptime_kuma_units():
+    cs = containers("uptime-kuma")
+    assert set(cs) == {"uptime-kuma", "uptime-kuma-otelcol"}
+    for q in cs.values():  # Kuma's own login is disabled (Authentik forward auth): Traefik must be the only way in
+        assert q["Container"]["Network"] == ["traefik.network"] and "PublishPort" not in q["Container"]
+    k = cs["uptime-kuma"]["Container"]
+    assert "UPTIME_KUMA_DB_TYPE=sqlite" in k["Environment"] and k["Volume"] == ["uptime-kuma-data.volume:/app/data"]
+    o = cs["uptime-kuma-otelcol"]
+    dest = "/var/data/secrets/uptime-kuma.env"
+    assert o["Container"]["EnvironmentFile"] == [dest] and o["Unit"]["ConditionPathExists"] == [dest]
+    assert o["Container"]["Volume"] == ["/etc/containers/systemd/apps/uptime-kuma/otelcol.conf:/etc/otelcol/config.yaml:ro,z"]
+    file, d, mode, owner, restart = next(l for l in targets("ecstasy") if l[0] == "uptime-kuma.env.sops")
+    assert (d, mode, owner, restart) == (dest, "0600", "root:root", "uptime-kuma-otelcol.service")
+    assert "uptime-kuma" in NODES["ecstasy"] and "uptime-kuma" not in NODES["coke"]
+
+
+def test_uptime_kuma_otelcol_config():
+    cfg = yaml.safe_load((APPS / "uptime-kuma" / "otelcol.conf").read_text())
+    jobs = cfg["receivers"]["prometheus"]["config"]["scrape_configs"]
+    assert [t for j in jobs for s in j["static_configs"] for t in s["targets"]] == ["uptime-kuma:3001"]
+    ip, host_port, _ = containers("monitoring")["victoriametrics"]["Container"]["PublishPort"][0].split(":")
+    exp = cfg["exporters"]["otlp_http"]
+    assert exp["metrics_endpoint"] == f"http://{ip}:{host_port}/opentelemetry/v1/metrics"
+    assert exp["headers"] == {"Authorization": "Basic ${env:VM_BASIC_AUTH}"}
+    assert cfg["service"]["pipelines"] == {"metrics": {"receivers": ["prometheus"], "exporters": ["otlp_http"]}}
+
+
+def test_uptime_kuma_routes():
+    http = load_routes(APPS / "uptime-kuma" / "routes.yml")["http"]
+    assert http["services"] == {"uptime-kuma": {"loadBalancer": {"servers": [{"url": "http://uptime-kuma:3001"}]}}}
+    rt = http["routers"]
+    assert set(rt) == {"uptime-kuma", "uptime-kuma-public", "uptime-kuma-outpost"}
+    assert rt["uptime-kuma"]["rule"] == f"Host(`{STATUS_HOST}`)" and rt["uptime-kuma"]["entryPoints"] == ["mesh"]
+    assert rt["uptime-kuma"]["middlewares"] == ["authentik-forward-auth"] and rt["uptime-kuma"]["service"] == "uptime-kuma"
+    # the internet (and the mesh, without login) gets exactly the status page paths; never /dashboard, /socket.io/, /metrics
+    assert rt["uptime-kuma-public"]["rule"] == f"Host(`{STATUS_HOST}`) && ({' || '.join(UPTIME_KUMA_PUBLIC)})"
+    assert rt["uptime-kuma-public"]["entryPoints"] == ["websecure", "mesh"] and rt["uptime-kuma-public"]["service"] == "uptime-kuma"
+    assert rt["uptime-kuma-outpost"]["rule"] == f"Host(`{STATUS_HOST}`) && PathPrefix(`/outpost.goauthentik.io/`)"
+    assert rt["uptime-kuma-outpost"]["entryPoints"] == ["mesh"] and rt["uptime-kuma-outpost"]["service"] == "authentik"
+    assert "middlewares" not in rt["uptime-kuma-public"] and "middlewares" not in rt["uptime-kuma-outpost"]
+    for n, r in rt.items():
+        check_router(n, r)
+    check_mesh_coverage(rt)
 
 
 # ---------------------------------------------- README recipes with real sops

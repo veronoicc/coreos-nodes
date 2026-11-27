@@ -1,0 +1,42 @@
+# Traefik routes for Uptime Kuma (status.sapphic.world), on ecstasy next to the container. Three routers on one host; Traefik's
+# default priority is the rule length, so the longer public and outpost rules win over the bare Host router.
+# - uptime-kuma (mesh only): the whole app behind Authentik forward auth (middleware authentik-forward-auth, apps/authentik/routes.yml).
+#   Kuma's own login is disabled, so this middleware is the only login.
+# - uptime-kuma-public (internet + mesh, no login): exactly what an anonymous status-page viewer needs (uptime-kuma 2.5.12:
+#   server/routers/status-page-router.js, api-router.js /api/entry-page /api/push /api/badge (public monitors only),
+#   server.js /upload static, index.html icons, src/main.js /serviceWorker.js; status pages use no socket.io,
+#   src/mixins/socket.js noSocketIOPages). NEVER add /dashboard, /socket.io/, /metrics or /settings: with auth disabled
+#   Kuma logs every socket in as admin. A test pins the rule.
+# - uptime-kuma-outpost (mesh only): the outpost's callback/sign-in paths on this host, to Authentik (service authentik).
+http:
+  routers:
+    uptime-kuma:
+      rule: Host(`status.sapphic.world`)
+      entryPoints: [mesh]
+      middlewares: [authentik-forward-auth]
+      tls:
+        certResolver: letsencrypt-dns
+        domains:
+          - main: "*.sapphic.world"
+      service: uptime-kuma
+    uptime-kuma-public:
+      rule: Host(`status.sapphic.world`) && (Path(`/`) || PathPrefix(`/status`) || Path(`/api/entry-page`) || PathPrefix(`/api/status-page/`) || PathPrefix(`/api/push/`) || PathPrefix(`/api/badge/`) || PathPrefix(`/assets/`) || PathPrefix(`/upload/`) || Path(`/icon.svg`) || Path(`/favicon.ico`) || Path(`/apple-touch-icon.png`) || Path(`/serviceWorker.js`))
+      entryPoints: [websecure, mesh]
+      tls:
+        certResolver: letsencrypt-dns
+        domains:
+          - main: "*.sapphic.world"
+      service: uptime-kuma
+    uptime-kuma-outpost:
+      rule: Host(`status.sapphic.world`) && PathPrefix(`/outpost.goauthentik.io/`)
+      entryPoints: [mesh]
+      tls:
+        certResolver: letsencrypt-dns
+        domains:
+          - main: "*.sapphic.world"
+      service: authentik
+  services:
+    uptime-kuma:
+      loadBalancer:
+        servers:
+          - url: http://uptime-kuma:3001

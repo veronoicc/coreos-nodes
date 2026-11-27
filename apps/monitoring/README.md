@@ -26,13 +26,15 @@ mesh device --psql-->   coke: timescaledb published on 100.127.197.215:5432  (no
 | File | Content |
 |---|---|
 | `timescaledb.container` | `docker.io/timescale/timescaledb:2.32.0-pg17`, superuser `admin`, default database `monitoring`, port `5432` on the mesh address, init script mounted read-only. |
-| `grafana.container` | `docker.io/grafana/grafana:13.3.1`, port `3000` on the mesh address, datasource file mounted read-only. |
+| `grafana.container` | `docker.io/grafana/grafana:13.3.1`, port `3000` on the mesh address, datasource files mounted read-only. |
+| `victoriametrics.container` | `docker.io/victoriametrics/victoria-metrics:v1.157.0`, port `8428` on the mesh address, basic auth `monitoring` / `VM_PASSWORD`, 1 year retention. Receives OTLP from Uptime Kuma's collector on ecstasy (`/opentelemetry/v1/metrics`, see [`apps/uptime-kuma/README.md`](../uptime-kuma/README.md)). |
 | `init-grafana-role.sh` | Creates the read-only role `grafana` (see below). |
 | `datasource-timescaledb.yaml` | Provisioned datasource: `postgres`, `timescaledb: true`, user `grafana`, password `$__env{GRAFANA_DB_PASSWORD}`, host `timescaledb`. |
+| `datasource-victoriametrics.yaml` | Provisioned datasource `VictoriaMetrics`: `prometheus` type, `http://victoriametrics:8428`, basic auth `monitoring` / `$__env{VM_PASSWORD}`, not default. |
 | `settings.env` | Non-secret Grafana settings (root URL, Authentik OAuth, role mapping, embedding). |
 | `routes.yml` | The two Traefik routers (below). |
-| `monitoring.network`, `timescaledb-data.volume`, `grafana-data.volume` | Network and persistent volumes. |
-| `/var/data/secrets/monitoring.env` | secrets-sync, 0600 root: `POSTGRES_PASSWORD`, `GRAFANA_DB_PASSWORD`, `GF_SECURITY_ADMIN_PASSWORD`, `GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET`. |
+| `monitoring.network`, `timescaledb-data.volume`, `grafana-data.volume`, `victoriametrics-data.volume` | Network and persistent volumes. |
+| `/var/data/secrets/monitoring.env` | secrets-sync, 0600 root: `POSTGRES_PASSWORD`, `GRAFANA_DB_PASSWORD`, `GF_SECURITY_ADMIN_PASSWORD`, `GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET`, `VM_PASSWORD` (rotation: [`apps/uptime-kuma/README.md`](../uptime-kuma/README.md)). |
 | `/var/data/secrets/authentik-grafana.env` | secrets-sync, 0600 root: `AUTHENTIK_GRAFANA_CLIENT_SECRET`, read by the Authentik worker's blueprint only. |
 
 ## Database

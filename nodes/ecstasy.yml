@@ -12,7 +12,7 @@ disk_gib: 20
 
 # Apps from apps/ this node runs (everything else is removed; empty or missing = no apps). Traefik also deploys the
 # routes.yml of every app listed on any node (coke's authentik, paperless), see README "Apps from git".
-apps: [traefik, netbird]
+apps: [traefik, netbird, uptime-kuma]
 
 # admin sshd; port 22 of the public and mesh IP is git SSH (Traefik -> Forgejo)
 ssh_port: 2200
