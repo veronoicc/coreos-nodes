@@ -21,14 +21,15 @@ browser --443--> ecstasy (176.65.149.212): Traefik, TLS for auth.sapphic.world (
   file only, no unit; root README, Apps from git), so the Traefik app stays app-agnostic. Authentik itself never sees the internet.
 - **Authentik is published only on coke's mesh address** (`PublishPort=<mesh ip>:9000:9000` in `authentik-server.container`), never on
   `0.0.0.0`. Even if coke later gets a public IP or a port forward, Authentik is not reachable there. The address is not a secret.
-  PostgreSQL and the worker publish nothing and live on the private `authentik.network`.
-- `settings.env` sets `AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS=10.89.10.1/32,100.127.17.6/32`: ecstasy's NetBird IP (the source of
-  published-port traffic, which arrives over the mesh) and the gateway of `authentik.network` (fixed subnet `10.89.10.0/24`) as a
-  fallback. The gateway was the source before the NetBird client fwmark fix: its mark bit 0x2000 made netavark masquerade every
-  DNATed connection to the bridge gateway. With `NB_FWMARK_BASE=0x1000000` on the client that no longer happens, and a direct mesh
-  request from ecstasy arrives as `100.127.17.6`. The gateway entry stays so a regression (e.g. a client update restoring the old
-  marks) still yields correct `X-Forwarded-*` handling. Trusting these makes Authentik honour the `X-Forwarded-Proto/Host` from
-  Traefik and build `https://auth.sapphic.world/...` URLs.
+  PostgreSQL and the worker publish nothing and live on the private `authentik.network`, which changedetection also joins (Authentik's
+  embedded outpost proxies to it in proxy mode, see [`apps/changedetection/README.md`](../changedetection/README.md)).
+- `settings.env` sets `AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS=100.127.17.6/32`: ecstasy's NetBird IP, the source of published-port
+  traffic, which arrives over the mesh. With `NB_FWMARK_BASE=0x1000000` on the client, netavark no longer masquerades DNATed
+  connections to the bridge gateway, so a direct mesh request from ecstasy arrives as `100.127.17.6`. Trusting it makes Authentik
+  honour the `X-Forwarded-Proto/Host` from Traefik and build `https://auth.sapphic.world/...` URLs. The `authentik.network` gateway
+  (`10.89.10.1`) is deliberately not trusted: changedetection's hairpin connections to the published port would arrive as the gateway
+  and could forge `X-Forwarded-*`. If a client update ever restores the old marks, Authentik serves `http://` URLs: fix the marks, do
+  not re-add the gateway.
 - No SMTP (no recovery mails). Error reporting off (`AUTHENTIK_ERROR_REPORTING__ENABLED=false`) and update check off
   (`AUTHENTIK_DISABLE_UPDATE_CHECK=true`): no telemetry call-home that upstream allows to disable.
 
@@ -37,7 +38,7 @@ browser --443--> ecstasy (176.65.149.212): Traefik, TLS for auth.sapphic.world (
 | `authentik-server.container` | `ghcr.io/goauthentik/server:2026.8.5`, `Exec=server`, port `9000` on the mesh address. Ordered after the baked `netbird.service`, retried forever until the mesh interface exists. |
 | `authentik-worker.container` | Same image, `Exec=worker`: tasks and blueprint application. No container socket (no outposts). |
 | `authentik-postgres.container` | `docker.io/library/postgres:16.15-alpine` (Authentik supports 14 to 18), healthcheck, unit active once healthy. |
-| `authentik.network` | Private network of the stack. |
+| `authentik.network` | Private network of the stack, plus changedetection (the embedded outpost's proxy upstream). |
 | `authentik-postgres.volume`, `authentik-data.volume`, `authentik-certs.volume` | PostgreSQL data, `/data` (media), `/certs`. All `# apps-sync: keep`. |
 | `settings.env` | Non-secret settings (database host/user/name, proxy CIDRs, telemetry off). |
 | `netbird-blueprint.yaml` | Declares the NetBird OIDC provider and application. Mounted into the worker as `/blueprints/custom/netbird.yaml`. |
@@ -168,7 +169,7 @@ Removing the app from git stops its units and keeps the volumes.
 
 On a node that still runs the old `apps-sync` (until its next reinstall) the plain command fails with `APPS_REPO_URL is not set`; use
 `sudo bash -c 'set -a; . /etc/apps-sync.env; apps-sync reset authentik'` (after a reinstall the plain form works). The installed version also does not
-recreate a changed network (`authentik.network`: `Subnet=`): stop the three units, `sudo podman network rm systemd-authentik`, start them.
+recreate a changed network (`authentik.network`: `Subnet=`): stop the three units and `changedetection` (it is attached too), `sudo podman network rm systemd-authentik`, start them.
 
 ## Upgrade
 

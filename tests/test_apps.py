@@ -567,13 +567,12 @@ def test_authentik_settings():
     assert env["AUTHENTIK_ERROR_REPORTING__ENABLED"] == "false" and env["AUTHENTIK_DISABLE_UPDATE_CHECK"] == "true"
     cidrs = [ipaddress.ip_network(c) for c in env["AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS"].split(",")]
     # Published mesh port traffic reaches the container from ecstasy's NetBird IP (the client's fwmark avoids netavark's
-    # masquerade, see build.py netbird_quadlet). The gateway stays trusted as a fallback in case the masquerade applies again:
-    # without trusting the source Authentik ignores X-Forwarded-Proto and serves http:// URLs.
+    # masquerade, see build.py netbird_quadlet); without trusting it Authentik ignores X-Forwarded-Proto and serves http:// URLs.
+    # The authentik.network gateway must NOT be trusted: changedetection shares that network, and its hairpin connections to the
+    # published port arrive masqueraded as the gateway, so trusting it would let changedetection forge X-Forwarded-*.
     net = parse_quadlet(APPS / "authentik" / "authentik.network")["Network"]
     assert net["Subnet"] == ["10.89.10.0/24"] and net["Gateway"] == ["10.89.10.1"]
-    assert cidrs == [ipaddress.ip_network("10.89.10.1/32"), ipaddress.ip_network("100.127.17.6/32")], (
-        "only the bridge gateway and ecstasy's mesh IP (= the path of the published port) may set X-Forwarded-*"
-    )
+    assert cidrs == [ipaddress.ip_network("100.127.17.6/32")], "only ecstasy's mesh IP (= the path of the published port) may set X-Forwarded-*"
     assert env["AUTHENTIK_POSTGRESQL__HOST"] == "authentik-postgres"
     assert not [k for k in env if "PASSWORD" in k or "SECRET" in k], "secrets only come from the rendered env file"
     assert "REDIS" not in " ".join(env), "2026.8 uses PostgreSQL only"

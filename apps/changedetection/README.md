@@ -17,10 +17,12 @@ coke: authentik-server --http://changedetection:5000 (authentik.network)--> chan
   authentik-server reaches it by container name (`internal_host` in the blueprint; a test checks it matches `ContainerName`).
 - The browser is only on `changedetection.network`: its CDP endpoint (3000) and `/stats` (8080) have no auth, and the untrusted page script it runs must not reach Authentik.
   The reverse direction (authentik-server joining `changedetection.network`) is deliberately not used for that reason.
-- On `authentik.network` changedetection can also open connections to `authentik-postgres`, which still requires its password.
+- On `authentik.network` changedetection can also open connections to `authentik-postgres`, which still requires its password. Authentik does not trust
+  the network's gateway as a proxy (`apps/authentik/settings.env`), so changedetection cannot forge `X-Forwarded-*` towards it.
 - The service `authentik` lives in [`apps/authentik/routes.yml`](../authentik/routes.yml); Traefik's file provider merges all route files.
-- The outpost passes `Host`, `X-Forwarded-Host` and Traefik's `X-Forwarded-Proto: https` through (authentik 2026.8.5 `internal/outpost/proxyv2/application/mode_proxy.go`,
-  `internal/web/proxy.go`), so changedetection's same-origin check for its Socket.IO live updates passes, and Go's reverse proxy carries the WebSocket upgrade.
+- authentik 2026.8.5 serves port 9000 with its Rust server: the outpost keeps `Host`, sets `X-Forwarded-Host` and passes Traefik's `X-Forwarded-Proto: https`
+  through (`src/outpost/proxy/application/handlers/proxy.rs`, `src/outpost/proxy/reverse_proxy.rs`), so changedetection's same-origin check for its
+  Socket.IO live updates passes, and the reverse proxy carries the WebSocket upgrade.
 
 | File | Content |
 |---|---|
@@ -75,4 +77,6 @@ State: `changedetection-data`. Stop `changedetection`, `sudo podman volume expor
 - `502` from the outpost after logging in: changedetection is not running, or not on `authentik.network` (`sudo podman inspect changedetection --format '{{json .NetworkSettings.Networks}}'`).
 - Socket.IO live updates fail (UI does not refresh, browser console shows a 400 on `/socket.io/`): python-engineio's same-origin check compares the `Origin`
   with `X-Forwarded-Proto`/`X-Forwarded-Host`, so one of them no longer reaches changedetection as `https`/`changedetection.sapphic.world` (e.g. after an
-  Authentik upgrade changed `mode_proxy.go`). Workaround: `Environment=SOCKETIO_CORS_ORIGINS=https://changedetection.sapphic.world` in `changedetection.container`.
+  Authentik upgrade changed `src/outpost/proxy/`). Workaround: `Environment=SOCKETIO_CORS_ORIGINS=https://changedetection.sapphic.world` in `changedetection.container`.
+- Restoring a backup ZIP over 32 MiB in the UI fails with `413`: authentik-server limits every request body to 32 MiB. Restore the volume instead
+  (`sudo podman volume import changedetection-data changedetection-data.tar` with `changedetection` stopped).
