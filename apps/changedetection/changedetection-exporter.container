@@ -1,0 +1,24 @@
+[Unit]
+Description=changedetection.io Prometheus exporter (watch, price and instance metrics from changedetection's API)
+Wants=network-online.target changedetection.service
+After=network-online.target changedetection.service
+RequiresMountsFor=/var/data
+# /var/data/secrets/changedetection.env (CDIO_API_KEY) is rendered by secrets-sync (secrets/coke/changedetection.env.sops); until
+# then the unit is skipped, and secrets-sync restarts it when the file appears or changes.
+ConditionPathExists=/var/data/secrets/changedetection.env
+
+[Container]
+Image=git.sapphic.world/veronoicc/changedetection.io-exporter:0.2.0
+ContainerName=changedetection-exporter
+# Private network only, no PublishPort: /metrics (9123) has no auth; changedetection-otelcol scrapes it here.
+Network=changedetection.network
+Environment=CDIO_API_BASE_URL=http://changedetection:5000
+# CDIO_API_KEY: changedetection's API key (Settings -> API). Read by podman, not systemd: SELinux denies systemd reading /var/data.
+EnvironmentFile=/var/data/secrets/changedetection.env
+
+[Service]
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

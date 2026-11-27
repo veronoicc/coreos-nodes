@@ -2,7 +2,9 @@
 
 changedetection.io 0.70.4 on **coke** (`apps: [..., changedetection]` in `nodes/coke.yml`), with sockpuppetbrowser 0.0.5 as its Playwright/JavaScript
 fetcher. **Mesh-only**, behind Authentik's embedded outpost in **proxy mode**: changedetection's own password stays off and it publishes no port, so the
-Authentik login is the only way in. No NetBird policy is needed for that. Declarative: Quadlets and routes via `apps-sync`; nothing secret. Generic mechanics: root README.
+Authentik login is the only way in. No NetBird policy is needed for that. Metrics: a Prometheus exporter reads changedetection's API and an OpenTelemetry
+Collector pushes them to VictoriaMetrics (`apps/monitoring`), the same pipeline as Uptime Kuma's. Declarative: Quadlets and routes via `apps-sync`, the
+metrics secret as `secrets/coke/changedetection.env.sops` via `secrets-sync`. Generic mechanics: root README.
 
 ## Topology
 
@@ -11,9 +13,12 @@ mesh --443--> ecstasy: Traefik `mesh` --> coke 100.127.197.215:9000 authentik-se
 coke: authentik-server --http://changedetection:5000 (authentik.network)--> changedetection
       changedetection --CDP ws://changedetection-browser:3000 (changedetection.network)--> changedetection-browser
       changedetection-browser: one headful Google Chrome per check --> internet
+      changedetection-exporter --API http://changedetection:5000 (x-api-key)--> changedetection
+      changedetection-otelcol --scrape changedetection-exporter:9123/metrics (changedetection.network)
+                              --OTLP/HTTP, basic auth--> victoriametrics:8428 (monitoring.network) <-- Grafana datasource `VictoriaMetrics`
 ```
 
-- Neither container publishes a port. changedetection is on two networks: `changedetection.network` (with its browser) and `authentik.network`, where
+- No container publishes a port. changedetection is on two networks: `changedetection.network` (with its browser) and `authentik.network`, where
   authentik-server reaches it by container name (`internal_host` in the blueprint; a test checks it matches `ContainerName`).
 - The browser is only on `changedetection.network`: its CDP endpoint (3000) and `/stats` (8080) have no auth, and the untrusted page script it runs must not reach Authentik.
   The reverse direction (authentik-server joining `changedetection.network`) is deliberately not used for that reason.
@@ -28,10 +33,14 @@ coke: authentik-server --http://changedetection:5000 (authentik.network)--> chan
 |---|---|
 | `changedetection.container` | `docker.io/dgtlmoon/changedetection.io:0.70.4`, networks `changedetection.network` + `authentik.network`, no published port, `PLAYWRIGHT_DRIVER_URL=ws://changedetection-browser:3000?--disable-blink-features=AutomationControlled`, `DISABLE_VERSION_CHECK=true`, data volume. |
 | `changedetection-browser.container` | `docker.io/dgtlmoon/sockpuppetbrowser:0.0.5`, `CHROME_HEADFUL=true`, 1920x1080, `LOG_LEVEL=INFO`, no published port. |
-| `changedetection.network` | Private network of the two containers. |
+| `changedetection.network` | Private network of the app's containers. |
+| `changedetection-exporter.container` | `git.sapphic.world/veronoicc/changedetection.io-exporter:0.2.0` (the repo's Forgejo registry), `CDIO_API_BASE_URL=http://changedetection:5000`, `CDIO_API_KEY` from the secret, `/metrics` on 9123, no published port, gated on the secret. |
+| `changedetection-otelcol.container` | `docker.io/otel/opentelemetry-collector:0.166.0` (same version as Uptime Kuma's, a test checks it), on `changedetection.network` + `monitoring.network`, mounts `otelcol.conf`, gated on the secret. |
+| `otelcol.conf` | Collector config: `prometheus` receiver (job `changedetection`, 60 s), `otlp_http` exporter to `http://victoriametrics:8428/opentelemetry/v1/metrics`. `.conf` for the same reason as Uptime Kuma's (Traefik parses every `.yml`). |
 | `changedetection-data.volume` | `/datastore`: watches, history snapshots, screenshots, settings. `# apps-sync: keep`. |
 | `routes.yml` | The Traefik router (below). |
 | `README.md` | This file. |
+| `/var/data/secrets/changedetection.env` | secrets-sync, 0600 root: `CDIO_API_KEY` (changedetection Settings -> API) and `VM_BASIC_AUTH` = base64 of `monitoring:<VM_PASSWORD>` (same password as `VM_PASSWORD` in `secrets/coke/monitoring.env.sops`). |
 | [`apps/authentik/changedetection-blueprint.yaml`](../authentik/changedetection-blueprint.yaml) | Proxy provider `changedetection.io` (`proxy` mode, external host `https://changedetection.sapphic.world`, internal host `http://changedetection:5000`), application `changedetection`, binding to `authentik Admins`. The embedded outpost entry in `uptime-kuma-blueprint.yaml` applies this blueprint first and assigns the provider. |
 
 ## Routes
@@ -44,9 +53,31 @@ coke: authentik-server --http://changedetection:5000 (authentik.network)--> chan
 1. Merge, push, then on coke and ecstasy run `sudo systemctl start apps-sync` (the Authentik containers restart once because their blueprint files changed).
 2. From a mesh peer, open `https://changedetection.sapphic.world`. It redirects to Authentik (`authentik Admins` only). Never set a password in changedetection's Settings.
 3. Settings -> Fetching: choose "Playwright Chromium/Javascript" as the default fetch method, or pick it per watch.
+4. Metrics: Settings -> API, copy the API key. From the repo root (needs your admin age key; plaintext only passes pipes), with the key in `k`:
+
+   ```
+   k='<API key from Settings -> API>'
+   p=$(sops -d --input-type dotenv --output-type dotenv --extract '["VM_PASSWORD"]' secrets/coke/monitoring.env.sops)
+   printf 'CDIO_API_KEY=%s\nVM_BASIC_AUTH=%s\n' "$k" "$(printf 'monitoring:%s' "$p" | base64 -w0)" |
+     sops --encrypt --filename-override secrets/coke/changedetection.env.sops --input-type dotenv --output-type dotenv \
+     --output secrets/coke/changedetection.env.sops /dev/stdin
+   ```
+
+   Commit, push; secrets-sync renders it and starts `changedetection-exporter` and `changedetection-otelcol`. Regenerating the key in Settings -> API
+   breaks the exporter (`changedetectionio_up == 0`) until this step is repeated. A VictoriaMetrics password rotation updates `VM_BASIC_AUTH` here too
+   ([`apps/uptime-kuma/README.md`](../uptime-kuma/README.md), VM password rotation).
+5. Grafana -> Explore -> `VictoriaMetrics`: `changedetectionio_up{service_name="changedetection"}` should be `1`. The exporter's example dashboard
+   (`examples/grafana-dashboard.json` in its repository) can be imported as is.
 
 Check: from any mesh peer, `curl -s -o /dev/null -w '%{http_code}\n' https://changedetection.sapphic.world/` prints `302` (redirect to Authentik), and
 `curl -m 5 http://100.127.197.215:5000/` is refused (nothing listens there). On coke, `sudo podman port changedetection` prints nothing.
+
+## Metrics
+
+The exporter's metrics (`changedetectionio_up`, `changedetectionio_system_*`, per watch `changedetectionio_watch_*` with labels `uuid`, `title`, `source`,
+prices for restock/`Offer` watches) are listed in its [README](https://git.sapphic.world/veronoicc/changedetection.io-exporter). The collector adds the
+resource labels `service_name="changedetection"` (the job), `service_instance_id`, `server_address`, `server_port`, `url_scheme`. Checked locally with the
+pinned images: changedetection -> exporter -> collector -> VictoriaMetrics yields `changedetectionio_up 1` and per-watch series.
 
 ## Browser
 

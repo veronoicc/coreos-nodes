@@ -1,3 +1,4 @@
 [Network]
-# Private network of the monitoring stack: Grafana reaches TimescaleDB as `timescaledb:5432` here. Nothing is published except
-# TimescaleDB and Grafana on the mesh address (see the .container files).
+# Private network of the monitoring stack: Grafana reaches TimescaleDB as `timescaledb:5432` here, and changedetection's collector
+# (apps/changedetection/changedetection-otelcol.container) pushes to `victoriametrics:8428`. Nothing is published except
+# TimescaleDB, Grafana and VictoriaMetrics on the mesh address (see the .container files).

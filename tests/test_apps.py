@@ -150,7 +150,8 @@ def test_container_hygiene(app, name, q):
     assert c["ContainerName"] == [name]
     assert "AutoUpdate" not in c
     image = c["Image"][0]
-    assert re.fullmatch(r"(docker\.io|ghcr\.io|codeberg\.org|code\.forgejo\.org)/[\w/.-]+:[\w.-]+", image) and not image.endswith(":latest"), image
+    # git.sapphic.world: the repo's own Forgejo registry, which every node logs in to (registry-auth.json.sops)
+    assert re.fullmatch(r"(docker\.io|ghcr\.io|codeberg\.org|code\.forgejo\.org|git\.sapphic\.world)/[\w/.-]+:[\w.-]+", image) and not image.endswith(":latest"), image
     assert not re.search(r"sock", "".join(c.get("Volume", [])))
     for env in c.get("EnvironmentFile", []):
         assert env.startswith((f"/etc/containers/systemd/apps/{app}/", "/var/data/secrets/")), env
@@ -180,6 +181,8 @@ def test_images_pinned():
     assert re.fullmatch(r"docker\.io/otel/opentelemetry-collector:\d+\.\d+\.\d+", img["uptime-kuma-otelcol"])
     assert re.fullmatch(r"docker\.io/dgtlmoon/changedetection\.io:\d+\.\d+\.\d+", img["changedetection"])
     assert re.fullmatch(r"docker\.io/dgtlmoon/sockpuppetbrowser:\d+\.\d+\.\d+", img["changedetection-browser"])
+    assert re.fullmatch(r"git\.sapphic\.world/veronoicc/changedetection\.io-exporter:\d+\.\d+\.\d+", img["changedetection-exporter"])
+    assert img["changedetection-otelcol"] == img["uptime-kuma-otelcol"]  # one collector version, one config dialect
 
 
 @pytest.mark.parametrize("vol", sorted(p for a in NODES_ALL for p in (APPS / a).glob("*.volume")), ids=lambda p: p.name)
@@ -1098,7 +1101,7 @@ def test_uptime_kuma_routes():
 
 def test_changedetection_units():
     cs = containers("changedetection")
-    assert set(cs) == {"changedetection", "changedetection-browser"}
+    assert set(cs) == {"changedetection", "changedetection-browser", "changedetection-exporter", "changedetection-otelcol"}
     # authentik.network: authentik-server's embedded outpost proxies to it by container name. Not the other way round
     # (authentik-server on changedetection.network), which would let the browser running untrusted page script reach Authentik.
     assert cs["changedetection"]["Container"]["Network"] == ["changedetection.network", "authentik.network"]
@@ -1115,6 +1118,37 @@ def test_changedetection_units():
     assert "CHROME_DISABLE_WEB_SECURITY=false" in browser["Container"]["Environment"]
     assert app["Container"]["Volume"] == ["changedetection-data.volume:/datastore"]
     assert "changedetection" in NODES["coke"] and "changedetection" not in NODES["ecstasy"]
+
+
+def test_changedetection_metrics_units():
+    cs = containers("changedetection")
+    exporter, otelcol = cs["changedetection-exporter"], cs["changedetection-otelcol"]
+    # /metrics has no auth: neither publishes a port; the exporter only needs changedetection's API on the private network
+    assert "PublishPort" not in exporter["Container"] and "PublishPort" not in otelcol["Container"]
+    assert exporter["Container"]["Network"] == ["changedetection.network"]
+    assert f"CDIO_API_BASE_URL=http://{cs['changedetection']['Container']['ContainerName'][0]}:5000" in exporter["Container"]["Environment"]
+    # the collector scrapes the exporter here and pushes to VictoriaMetrics on monitoring.network (coke-local, no mesh hop)
+    assert otelcol["Container"]["Network"] == ["changedetection.network", "monitoring.network"]
+    assert otelcol["Container"]["Volume"] == ["/etc/containers/systemd/apps/changedetection/otelcol.conf:/etc/otelcol/config.yaml:ro,z"]
+    dest = "/var/data/secrets/changedetection.env"  # CDIO_API_KEY (exporter) and VM_BASIC_AUTH (collector)
+    for q in (exporter, otelcol):
+        assert q["Container"]["EnvironmentFile"] == [dest] and q["Unit"]["ConditionPathExists"] == [dest]
+    file, d, mode, owner, restart = next(l for l in targets("coke") if l[0] == "changedetection.env.sops")
+    assert (d, mode, owner) == (dest, "0600", "root:root")
+    assert set(restart.split(",")) == {"changedetection-exporter.service", "changedetection-otelcol.service"}
+
+
+def test_changedetection_otelcol_config():
+    cfg = yaml.safe_load((APPS / "changedetection" / "otelcol.conf").read_text())
+    jobs = cfg["receivers"]["prometheus"]["config"]["scrape_configs"]
+    exporter = containers("changedetection")["changedetection-exporter"]["Container"]["ContainerName"][0]
+    assert [t for j in jobs for s in j["static_configs"] for t in s["targets"]] == [f"{exporter}:9123"]
+    vm = containers("monitoring")["victoriametrics"]["Container"]
+    assert "monitoring.network" in vm["Network"]
+    exp = cfg["exporters"]["otlp_http"]
+    assert exp["metrics_endpoint"] == f"http://{vm['ContainerName'][0]}:8428/opentelemetry/v1/metrics"
+    assert exp["headers"] == {"Authorization": "Basic ${env:VM_BASIC_AUTH}"}
+    assert cfg["service"]["pipelines"] == {"metrics": {"receivers": ["prometheus"], "exporters": ["otlp_http"]}}
 
 
 def test_changedetection_routes():
@@ -1246,8 +1280,8 @@ def test_no_private_keys_or_plaintext_config_in_the_repo():
         if rel.parts[0] not in ("tests",) and p.name != "README.md":
             # plaintext NetBird config / Authentik env would carry these keys with a literal value
             assert not re.search(rb"(?m)^\s*(encryptionKey|authSecret|sessionCookieEncryptionKey):\s*[\"']?[A-Za-z0-9+/=]{16,}", data), rel
-            assert not re.search(rb"(?m)^(AUTHENTIK_SECRET_KEY|POSTGRES_PASSWORD|AUTHENTIK_POSTGRESQL__PASSWORD|AUTHENTIK_NETBIRD_CLIENT_SECRET|AUTHENTIK_PAPERLESS_CLIENT_SECRET|AUTHENTIK_GRAFANA_CLIENT_SECRET|AUTHENTIK_FORGEJO_CLIENT_SECRET|FORGEJO__security__SECRET_KEY|FORGEJO_RUNNER_\d_SECRET|PAPERLESS_SECRET_KEY|PAPERLESS_SOCIALACCOUNT_PROVIDERS|GRAFANA_DB_PASSWORD|GF_SECURITY_ADMIN_PASSWORD|GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET|VM_PASSWORD|VM_BASIC_AUTH)=[^E\s]", data), rel
-    for forbidden in (ROOT / "secrets" / "ecstasy" / "config.yaml", ROOT / "secrets" / "coke" / "authentik.env", ROOT / "secrets" / "coke" / "paperless.env", ROOT / "secrets" / "coke" / "authentik-paperless.env", ROOT / "secrets" / "coke" / "monitoring.env", ROOT / "secrets" / "coke" / "authentik-grafana.env", ROOT / "secrets" / "coke" / "forgejo.env", ROOT / "secrets" / "coke" / "authentik-forgejo.env", ROOT / "secrets" / "coke" / "forgejo-runners.env", ROOT / "secrets" / "ecstasy" / "uptime-kuma.env", APPS / "netbird" / "config.yaml"):
+            assert not re.search(rb"(?m)^(AUTHENTIK_SECRET_KEY|POSTGRES_PASSWORD|AUTHENTIK_POSTGRESQL__PASSWORD|AUTHENTIK_NETBIRD_CLIENT_SECRET|AUTHENTIK_PAPERLESS_CLIENT_SECRET|AUTHENTIK_GRAFANA_CLIENT_SECRET|AUTHENTIK_FORGEJO_CLIENT_SECRET|FORGEJO__security__SECRET_KEY|FORGEJO_RUNNER_\d_SECRET|PAPERLESS_SECRET_KEY|PAPERLESS_SOCIALACCOUNT_PROVIDERS|GRAFANA_DB_PASSWORD|GF_SECURITY_ADMIN_PASSWORD|GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET|VM_PASSWORD|VM_BASIC_AUTH|CDIO_API_KEY)=[^E\s]", data), rel
+    for forbidden in (ROOT / "secrets" / "ecstasy" / "config.yaml", ROOT / "secrets" / "coke" / "authentik.env", ROOT / "secrets" / "coke" / "paperless.env", ROOT / "secrets" / "coke" / "authentik-paperless.env", ROOT / "secrets" / "coke" / "monitoring.env", ROOT / "secrets" / "coke" / "authentik-grafana.env", ROOT / "secrets" / "coke" / "forgejo.env", ROOT / "secrets" / "coke" / "authentik-forgejo.env", ROOT / "secrets" / "coke" / "forgejo-runners.env", ROOT / "secrets" / "coke" / "changedetection.env", ROOT / "secrets" / "ecstasy" / "uptime-kuma.env", APPS / "netbird" / "config.yaml"):
         assert not forbidden.exists()
 
 

@@ -63,7 +63,8 @@ Kuma's metrics: `monitor_status`, `monitor_response_time`, `monitor_response_tim
 
 ## VM password rotation
 
-`VM_PASSWORD` (coke) and `VM_BASIC_AUTH` (ecstasy) must carry the same password. From the repo root (needs your admin age key; plaintext only passes pipes):
+`VM_PASSWORD` (coke), `VM_BASIC_AUTH` (ecstasy) and `VM_BASIC_AUTH` in `secrets/coke/changedetection.env.sops` (changedetection's collector, if that file exists)
+must carry the same password. From the repo root (needs your admin age key; plaintext only passes pipes):
 
 ```
 p=$(openssl rand -hex 24)
@@ -73,6 +74,11 @@ p=$(openssl rand -hex 24)
 printf 'VM_BASIC_AUTH=%s\n' "$(printf 'monitoring:%s' "$p" | base64 -w0)" |
   sops --encrypt --filename-override secrets/ecstasy/uptime-kuma.env.sops --input-type dotenv --output-type dotenv \
   --output secrets/ecstasy/uptime-kuma.env.sops /dev/stdin
+[ ! -e secrets/coke/changedetection.env.sops ] ||
+  { sops -d --input-type dotenv --output-type dotenv secrets/coke/changedetection.env.sops | grep -v '^VM_BASIC_AUTH='
+    printf 'VM_BASIC_AUTH=%s\n' "$(printf 'monitoring:%s' "$p" | base64 -w0)"; } |
+  sops --encrypt --filename-override secrets/coke/changedetection.env.sops --input-type dotenv --output-type dotenv \
+  --output secrets/coke/changedetection.env.sops.new /dev/stdin && mv secrets/coke/changedetection.env.sops.new secrets/coke/changedetection.env.sops
 ```
 
 Check that both match (prints `match`, never the value):
@@ -82,7 +88,7 @@ Check that both match (prints `match`, never the value):
   "$(sops -d --input-type dotenv --output-type dotenv --extract '["VM_BASIC_AUTH"]' secrets/ecstasy/uptime-kuma.env.sops | base64 -d | cut -d: -f2)" ] && echo match
 ```
 
-Push; secrets-sync restarts `timescaledb`, `grafana`, `victoriametrics` (coke) and `uptime-kuma-otelcol` (ecstasy).
+Push; secrets-sync restarts `timescaledb`, `grafana`, `victoriametrics`, `changedetection-exporter`, `changedetection-otelcol` (coke) and `uptime-kuma-otelcol` (ecstasy).
 
 ## Backup
 

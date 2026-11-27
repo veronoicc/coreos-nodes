@@ -1,0 +1,26 @@
+[Unit]
+Description=OpenTelemetry Collector (scrapes changedetection-exporter /metrics, pushes OTLP to VictoriaMetrics)
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/var/data
+# /var/data/secrets/changedetection.env (VM_BASIC_AUTH) is rendered by secrets-sync (secrets/coke/changedetection.env.sops); until
+# then the unit is skipped, and secrets-sync restarts it when the file appears or changes.
+ConditionPathExists=/var/data/secrets/changedetection.env
+
+[Container]
+Image=docker.io/otel/opentelemetry-collector:0.166.0
+ContainerName=changedetection-otelcol
+# Scrape target changedetection-exporter:9123 on the private network; VictoriaMetrics (victoriametrics:8428) on monitoring.network,
+# both on coke, so the push needs no mesh hop and no NetBird policy.
+Network=changedetection.network
+Network=monitoring.network
+EnvironmentFile=/var/data/secrets/changedetection.env
+# At the image's default --config path. Named .conf like apps/uptime-kuma/otelcol.conf: Traefik parses every .yml/.yaml/.toml in the apps dir.
+Volume=/etc/containers/systemd/apps/changedetection/otelcol.conf:/etc/otelcol/config.yaml:ro,z
+
+[Service]
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
