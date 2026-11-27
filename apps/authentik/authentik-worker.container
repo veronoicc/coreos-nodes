@@ -39,6 +39,9 @@ Volume=/etc/containers/systemd/apps/authentik/grafana-blueprint.yaml:/blueprints
 Volume=/etc/containers/systemd/apps/authentik/forgejo-blueprint.yaml:/blueprints/custom/forgejo.yaml:ro,z
 # Blueprint: Uptime Kuma forward-auth proxy provider, application, group binding, embedded outpost assignment (no secret).
 Volume=/etc/containers/systemd/apps/authentik/uptime-kuma-blueprint.yaml:/blueprints/custom/uptime-kuma.yaml:ro,z
+# Blueprint: changedetection.io forward-auth proxy provider, application, group binding (no secret); the embedded outpost
+# entry in uptime-kuma-blueprint.yaml assigns it.
+Volume=/etc/containers/systemd/apps/authentik/changedetection-blueprint.yaml:/blueprints/custom/changedetection.yaml:ro,z
 
 [Service]
 Restart=on-failure

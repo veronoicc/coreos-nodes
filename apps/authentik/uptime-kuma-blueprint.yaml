@@ -2,9 +2,11 @@
 # OIDC, so Authentik's embedded outpost (inside authentik-server) authenticates the admin UI through Traefik's forwardAuth
 # middleware `authentik-forward-auth` (apps/authentik/routes.yml); the routes are in apps/uptime-kuma/routes.yml.
 # Mounted into the worker as /blueprints/custom/uptime-kuma.yaml; nothing secret.
-# The `providers` list and `config` of the embedded outpost are REPLACED on every apply: add any future proxy provider or
-# outpost setting here, not in the UI. `config` is the outpost's full stored config (authentik 2026.8.5) with authentik_host
-# fixed: it was saved once as the retired https://auth.veronoi.cc, and the outpost sends browsers to it for login.
+# This file owns the embedded outpost for EVERY forward-auth app: its `providers` list and `config` are REPLACED on every
+# apply, so add any future proxy provider or outpost setting here, not in the UI. Other apps' proxy providers live in their
+# own blueprint, applied first through an authentik_blueprints.metaapplyblueprint entry and listed by name with !Find
+# (changedetection.io: changedetection-blueprint.yaml). `config` is the outpost's full stored config (authentik 2026.8.5) with
+# authentik_host fixed: it was saved once as the retired https://auth.veronoi.cc, and the outpost sends browsers to it for login.
 version: 1
 metadata:
   name: Uptime Kuma
@@ -31,12 +33,18 @@ entries:
       order: 0
     attrs:
       group: !Find [authentik_core.group, [name, authentik Admins]]
+  # changedetection.io's provider is declared in changedetection-blueprint.yaml: apply it first so the !Find below resolves.
+  - model: authentik_blueprints.metaapplyblueprint
+    attrs:
+      identifiers:
+        name: changedetection.io
   - model: authentik_outposts.outpost
     identifiers:
       managed: goauthentik.io/outposts/embedded
     attrs:
       providers:
         - !KeyOf uptime-kuma-provider
+        - !Find [authentik_providers_proxy.proxyprovider, [name, changedetection.io]]
       config:
         authentik_host: https://auth.sapphic.world
         authentik_host_insecure: false

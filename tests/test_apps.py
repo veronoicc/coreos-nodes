@@ -198,6 +198,7 @@ PUBLIC_IP, MESH_IP = "176.65.149.212", "100.127.17.6"  # ecstasy: ens18 and wt0 
 ZONES = ("service.veronoi.cc", "sapphic.world")  # each: Cloudflare wildcard -> PUBLIC_IP; NetBird custom zone `A *` -> MESH_IP
 AUTH_HOST, NB_HOST = "auth.sapphic.world", "mesh.sapphic.world"
 STATUS_HOST = "status.sapphic.world"
+CD_HOST = "changedetection.sapphic.world"
 
 
 def test_traefik_static_config():
@@ -696,12 +697,45 @@ def test_uptime_kuma_blueprint():
     assert binding["attrs"]["group"].value == ["authentik_core.group", ["name", "authentik Admins"]]
     outpost = entry("authentik_outposts.outpost")  # the embedded outpost (inside authentik-server) serves the forward auth
     assert outpost["identifiers"] == {"managed": "goauthentik.io/outposts/embedded"}
-    assert [(p.tag, p.value) for p in outpost["attrs"]["providers"]] == [("KeyOf", "uptime-kuma-provider")]
+    # one embedded outpost entry serves every forward-auth app (its providers list is replaced on each apply)
+    assert [(p.tag, p.value) for p in outpost["attrs"]["providers"]] == [
+        ("KeyOf", "uptime-kuma-provider"),
+        ("Find", ["authentik_providers_proxy.proxyprovider", ["name", "changedetection.io"]]),
+    ]
+    # the changedetection blueprint is applied first, so the !Find above resolves
+    meta = entry("authentik_blueprints.metaapplyblueprint")
+    assert meta["attrs"]["identifiers"] == {"name": "changedetection.io"}
+    assert doc["entries"].index(meta) < doc["entries"].index(outpost)
     # the outpost redirects browsers to authentik_host; it was stored once as the retired auth.veronoi.cc, so the blueprint pins it
     assert outpost["attrs"]["config"]["authentik_host"] == f"https://{AUTH_HOST}"
     assert not [n for n in walk(doc) if isinstance(n, _Tag) and n.tag == "Env"]  # no secret: nothing to render
     worker = parse_quadlet(APPS / "authentik" / "authentik-worker.container")
     assert "uptime-kuma-blueprint.yaml:/blueprints/custom/uptime-kuma.yaml:ro,z" in "".join(worker["Container"]["Volume"])
+
+
+def test_changedetection_blueprint():
+    doc = load_blueprint(APPS / "authentik" / "changedetection-blueprint.yaml")
+    assert doc["version"] == 1
+    # uptime-kuma-blueprint.yaml applies this blueprint by name and finds its provider by name: all must agree
+    assert doc["metadata"]["name"] == "changedetection.io"
+    entry = lambda m: next(e for e in doc["entries"] if e["model"] == m)  # noqa: E731
+    provider = entry("authentik_providers_proxy.proxyprovider")
+    assert provider["id"] == "changedetection-provider" and provider["identifiers"] == {"name": "changedetection.io"}
+    assert provider["attrs"]["mode"] == "forward_single" and provider["attrs"]["external_host"] == f"https://{CD_HOST}"
+    assert provider["attrs"]["authorization_flow"].value == ["authentik_flows.flow", ["slug", "default-provider-authorization-implicit-consent"]]
+    app = entry("authentik_core.application")
+    assert app["identifiers"] == {"slug": "changedetection"}
+    assert (app["attrs"]["provider"].tag, app["attrs"]["provider"].value) == ("KeyOf", "changedetection-provider")
+    binding = entry("authentik_policies.policybinding")
+    assert binding["identifiers"]["target"].value == ["authentik_core.application", ["slug", "changedetection"]]
+    assert binding["attrs"]["group"].value == ["authentik_core.group", ["name", "authentik Admins"]]
+    assert not [n for n in walk(doc) if isinstance(n, _Tag) and n.tag == "Env"]  # no secret: nothing to render
+    # exactly one blueprint owns the embedded outpost: two would overwrite each other's providers list on every apply
+    owners = [p.name for p in sorted((APPS / "authentik").glob("*-blueprint.yaml"))
+              if any(e["model"] == "authentik_outposts.outpost" for e in load_blueprint(p)["entries"])]
+    assert owners == ["uptime-kuma-blueprint.yaml"]
+    worker = parse_quadlet(APPS / "authentik" / "authentik-worker.container")
+    assert "changedetection-blueprint.yaml:/blueprints/custom/changedetection.yaml:ro,z" in "".join(worker["Container"]["Volume"])
 
 
 def walk(node):
